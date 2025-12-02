@@ -8,6 +8,36 @@ import plotly.express as px
 import plotly.graph_objects as go
 from scipy.stats import hypergeom
 
+# ==========================================
+# 🔐 BLOC SÉCURITÉ (À AJOUTER ICI)
+# ==========================================
+def check_password():
+    """Retourne True si l'utilisateur a le bon mot de passe."""
+    def password_entered():
+        # On compare le mot de passe saisi avec celui stocké dans les secrets Streamlit
+        if st.session_state["password"] == st.secrets["PASSWORD"]:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # On efface le mdp de la mémoire immédiate
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        # Première visite, on montre le champ
+        st.text_input("🔒 Veuillez entrer le mot de passe pour accéder à l'outil", type="password", on_change=password_entered, key="password")
+        return False
+    elif not st.session_state["password_correct"]:
+        # Mot de passe incorrect
+        st.text_input("🔒 Veuillez entrer le mot de passe", type="password", on_change=password_entered, key="password")
+        st.error("😕 Mot de passe incorrect")
+        return False
+    else:
+        # Mot de passe correct
+        return True
+
+if not check_password():
+    st.stop()  # 🛑 ARRÊTE TOUT SI PAS CONNECTÉ
+
+
 # ---------------------------------------
 # 1. CONFIGURATION & OUTILS
 # ---------------------------------------
