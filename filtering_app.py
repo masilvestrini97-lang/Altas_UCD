@@ -8,41 +8,38 @@ import plotly.express as px
 import plotly.graph_objects as go
 from scipy.stats import hypergeom
 
-# ==========================================
-# 🔐 BLOC SÉCURITÉ (À AJOUTER ICI)
-# ==========================================
-def check_password():
-    """Retourne True si l'utilisateur a le bon mot de passe."""
-    def password_entered():
-        # On compare le mot de passe saisi avec celui stocké dans les secrets Streamlit
-        if st.session_state["password"] == st.secrets["PASSWORD"]:
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]  # On efface le mdp de la mémoire immédiate
-        else:
-            st.session_state["password_correct"] = False
-
-    if "password_correct" not in st.session_state:
-        # Première visite, on montre le champ
-        st.text_input("🔒 Veuillez entrer le mot de passe pour accéder à l'outil", type="password", on_change=password_entered, key="password")
-        return False
-    elif not st.session_state["password_correct"]:
-        # Mot de passe incorrect
-        st.text_input("🔒 Veuillez entrer le mot de passe", type="password", on_change=password_entered, key="password")
-        st.error("😕 Mot de passe incorrect")
-        return False
-    else:
-        # Mot de passe correct
-        return True
-
-if not check_password():
-    st.stop()  # 🛑 ARRÊTE TOUT SI PAS CONNECTÉ
-
-
 # ---------------------------------------
 # 1. CONFIGURATION & OUTILS
 # ---------------------------------------
 
-st.set_page_config(page_title="NGS ATLAS Explorer v6.3", layout="wide", page_icon="🧬")
+st.set_page_config(page_title="NGS ATLAS Explorer", layout="wide", page_icon="🧬")
+
+# ==========================================
+# 🔐 BLOC SÉCURITÉ
+# ==========================================
+def check_password():
+    """Retourne True si l'utilisateur a le bon mot de passe."""
+    def password_entered():
+        if st.session_state["password"] == st.secrets["PASSWORD"]:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        st.text_input("🔒 Mot de passe", type="password", on_change=password_entered, key="password")
+        return False
+    elif not st.session_state["password_correct"]:
+        st.text_input("🔒 Mot de passe", type="password", on_change=password_entered, key="password")
+        st.error("😕 Incorrect")
+        return False
+    else:
+        return True
+
+if not check_password():
+    st.stop()
+
+# ==========================================
 
 def clean_text(val):
     if not isinstance(val, str): return ""
@@ -64,24 +61,17 @@ def load_variants(uploaded_file, sep_guess="auto"):
         st.error(f"Erreur lecture : {e}")
         return None
 
-# Fonctions pour générer les URLs
 def make_varsome_link(variant_str):
-    # Attend format "9:133759544:G>T" ou similaire
     try:
-        # Varsome aime chr:pos:ref:alt (hg19)
-        # On remplace > par : pour uniformiser
         v = variant_str.replace(">", ":")
         return f"https://varsome.com/variant/hg19/{v}"
-    except:
-        return ""
+    except: return ""
 
 def make_gnomad_link(variant_str):
     try:
-        # gnomAD aime chr-pos-ref-alt
         v = variant_str.replace(":", "-").replace(">", "-")
         return f"https://gnomad.broadinstitute.org/variant/{v}?dataset=gnomad_r2_1"
-    except:
-        return ""
+    except: return ""
 
 # ---------------------------------------
 # 2. LOGIQUE DE FILTRAGE
@@ -105,11 +95,9 @@ def apply_filtering_and_scoring(
 
     df["Gene_symbol"] = df["Gene_symbol"].str.upper().str.replace(" ", "")
 
-    # Remplissage
     for col in ["Variant_effect", "Putative_impact", "Clinvar_significance"]:
         if col in df.columns: df[col] = df[col].fillna("Non Renseigné")
 
-    # Fréquence Interne
     if "Pseudo" in df.columns and "Variant" in df.columns:
         tot = df["Pseudo"].nunique()
         cts = df.groupby("Variant")["Pseudo"].nunique()
@@ -119,7 +107,6 @@ def apply_filtering_and_scoring(
         df["internal_freq"] = 0.0
         df["Fréquence_Cohorte"] = "N/A"
 
-    # Conversions
     cols_num = ["gnomad_exomes_NFE_AF", "CADD_phred", "Allelic_ratio", "Depth", "Alt_depth_total", "patho_score"]
     for c in cols_num:
         if c in df.columns: df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -127,7 +114,7 @@ def apply_filtering_and_scoring(
     if "Alt_depth_total" not in df.columns and "Alt_depth" in df.columns:
         df["Alt_depth_total"] = df["Alt_depth"].astype(str).str.split(' ').str[0].apply(lambda x: int(x) if x.isdigit() else 0)
 
-    # --- FILTRES ---
+    # FILTRES
     last_count = len(df)
 
     if "Depth" in df.columns: df = df[df["Depth"] >= min_depth]
@@ -159,7 +146,7 @@ def apply_filtering_and_scoring(
         df = df[df["CADD_phred"] >= min_cadd]
     logs.append({"Etape": "9. CADD", "Restants": len(df), "Perdus": last_count - len(df)}); last_count = len(df)
 
-    # --- GENERATION DES LIENS (V6.3) ---
+    # LIENS
     if "Variant" in df.columns:
         df["link_varsome"] = df["Variant"].apply(make_varsome_link)
         df["link_gnomad"] = df["Variant"].apply(make_gnomad_link)
@@ -167,7 +154,7 @@ def apply_filtering_and_scoring(
         df["link_varsome"] = ""
         df["link_gnomad"] = ""
 
-    # --- SCORING ---
+    # SCORING
     df["msc_weight"] = 0.0
     if use_msc and constraint_file_content:
         try:
@@ -208,7 +195,7 @@ def apply_filtering_and_scoring(
 
     df["patho_score"] = df["score_putative"] + df["score_cadd"] + df["score_clinvar"] + df["msc_weight"]
 
-    # --- ACMG ---
+    # ACMG
     if use_acmg:
         def compute_acmg_class(row):
             eff = str(row.get("Variant_effect", "")).lower()
@@ -255,16 +242,34 @@ def apply_filtering_and_scoring(
     return df, initial_total, len(df), None, logs
 
 # ---------------------------------------
-# 3. ANALYSE PATHWAYS
+# 3. ANALYSE PATHWAYS (HYBRIDE LOCAL/UPLOAD)
 # ---------------------------------------
 
-def parse_pathway_files(uploaded_files):
+# Fonction pour charger le fichier local s'il existe
+def load_local_pathways(filepath="pathways.gmt"):
+    pathways = {}
+    if not os.path.exists(filepath):
+        return pathways
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split("\t")
+                if len(parts) >= 3:
+                    pw = parts[0].strip()
+                    genes = [g.strip().upper() for g in parts[2:] if g.strip()]
+                    if pw and genes:
+                        if pw not in pathways: pathways[pw] = []
+                        pathways[pw].extend(genes)
+    except Exception as e:
+        st.warning(f"Fichier local trouvé mais erreur de lecture : {e}")
+    return pathways
+
+def parse_uploaded_pathways(uploaded_files):
     pathways = {}
     if not uploaded_files: return pathways
     for up_file in uploaded_files:
         content = up_file.read().decode("utf-8", errors="ignore")
-        fname = up_file.name.lower()
-        if fname.endswith(".gmt"):
+        if up_file.name.lower().endswith(".gmt"):
             for line in content.splitlines():
                 parts = line.strip().split("\t")
                 if len(parts) >= 3:
@@ -273,7 +278,6 @@ def parse_pathway_files(uploaded_files):
                     if pw and genes:
                         if pw not in pathways: pathways[pw] = []
                         pathways[pw].extend(genes)
-    for k in pathways: pathways[k] = list(set(pathways[k]))
     return pathways
 
 @st.cache_data
@@ -324,6 +328,11 @@ if "analysis_done" not in st.session_state:
     st.session_state["kpis"] = (0, 0)
     st.session_state["logs"] = []
 
+# --- CHARGEMENT AUTO DES PATHWAYS LOCAUX ---
+# On charge dès le lancement si le fichier existe
+local_pws = load_local_pathways("pathways.gmt")
+has_local = len(local_pws) > 0
+
 with st.sidebar:
     st.header("1. Données")
     uploaded_file = st.file_uploader("Fichier Variants", type=["csv", "tsv", "txt"])
@@ -369,7 +378,11 @@ with st.sidebar:
             msc_file = st.file_uploader("Fichier MSC", type=["tsv"])
 
         st.header("3. Pathways")
-        path_files = st.file_uploader("Fichiers GMT", accept_multiple_files=True)
+        if has_local:
+            st.success(f"✅ Fichier 'pathways.gmt' chargé ({len(local_pws)} voies).")
+            st.info("Vous pouvez ajouter d'autres fichiers ci-dessous si besoin.")
+        
+        path_files = st.file_uploader("Fichiers GMT Supplémentaires", accept_multiple_files=True)
         
         submitted = st.form_submit_button("🚀 LANCER L'ANALYSE")
 
@@ -393,9 +406,19 @@ if submitted and df_raw is not None:
         st.session_state["logs"] = logs
         st.session_state["use_acmg"] = use_acmg
         
-        user_pathways = parse_pathway_files(path_files)
-        if user_pathways:
-            df_enr = compute_enrichment(res, user_pathways)
+        # COMBINAISON DES PATHWAYS (LOCAL + UPLOAD)
+        combined_pathways = local_pws.copy()
+        uploaded_pws = parse_uploaded_pathways(path_files)
+        # Fusion des dictionnaires
+        for k, v in uploaded_pws.items():
+            if k not in combined_pathways:
+                combined_pathways[k] = v
+            else:
+                # Si le pathway existe déjà, on évite les doublons
+                combined_pathways[k] = list(set(combined_pathways[k] + v))
+
+        if combined_pathways:
+            df_enr = compute_enrichment(res, combined_pathways)
             st.session_state["df_enr"] = df_enr
         else:
             st.session_state["df_enr"] = pd.DataFrame()
@@ -458,24 +481,17 @@ if st.session_state["analysis_done"]:
                         st.plotly_chart(fig_pat, use_container_width=True)
             else: st.warning("Pas de colonne Pseudo.")
 
-    # --- NOUVEL ONGLET CORRELATION ---
     with t3:
         st.subheader("🧩 Matrice de Co-occurrence (Heatmap)")
         if "Pseudo" in df_res.columns and "Gene_symbol" in df_res.columns:
-            # On prend les 30 gènes les plus fréquents pour éviter une heatmap illisible
             top_genes = df_res["Gene_symbol"].value_counts().head(30).index.tolist()
             df_heat = df_res[df_res["Gene_symbol"].isin(top_genes)]
             
             if not df_heat.empty:
-                # Création de la matrice binaire (Patient x Gène)
                 matrix = df_heat.pivot_table(index="Pseudo", columns="Gene_symbol", aggfunc='size', fill_value=0)
-                # On ramène tout à 0 ou 1 (présence/absence)
                 matrix[matrix > 0] = 1
-                
-                # Produit matriciel pour compter les co-occurrences
                 co_occ = matrix.T.dot(matrix)
                 
-                # Heatmap Plotly
                 fig_corr = px.imshow(co_occ, text_auto=True, color_continuous_scale="Viridis", aspect="auto", title="Co-occurrence des mutations (Top 30 gènes)")
                 st.plotly_chart(fig_corr, use_container_width=True)
                 
@@ -508,7 +524,7 @@ if st.session_state["analysis_done"]:
 
     with t6:
         if df_enr.empty:
-            st.info("Chargez des fichiers .gmt pour voir les pathways.")
+            st.info("Aucun pathway chargé (local ou upload).")
         else:
             top = df_enr.sort_values("FDR").head(15)
             st.plotly_chart(px.bar(top, x="minus_log10_FDR", y="pathway", orientation='h', color="k_overlap"), use_container_width=True)
