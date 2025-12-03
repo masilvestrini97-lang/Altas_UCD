@@ -518,9 +518,14 @@ if st.session_state["analysis_done"]:
     t1, t2, t3, t4, t5 = st.tabs(["📋 Liste Variants", "🔍 Inspecteur Patient", "📉 Entonnoir de Filtre", "📊 Stats QC", "🧬 Pathways"])
 
     with t1:
-        st.caption("Tableau interactif. Cliquez sur les en-têtes pour trier.")
+        st.subheader("📋 Tableau des Variants")
         
-        # Configuration des colonnes pour un affichage propre
+        # 1. Option pour tout afficher
+        show_all_cols = st.checkbox("👀 Voir toutes les colonnes (Mode expert)", value=False)
+        
+        st.caption("Tableau interactif. Cliquez sur les en-têtes pour trier. Double-cliquez sur une cellule pour voir tout son contenu.")
+        
+        # 2. Configuration du formatage (pour que les liens et barres fonctionnent toujours)
         col_config = {
             "Fréquence_Cohorte": st.column_config.TextColumn("Freq. Cohorte", help="Combien de fois ce variant apparait dans le fichier"),
             "patho_score": st.column_config.ProgressColumn("Score", min_value=0, max_value=15, format="%.1f"),
@@ -532,15 +537,39 @@ if st.session_state["analysis_done"]:
         if acmg_active:
             col_config["ACMG_Class"] = st.column_config.TextColumn("ACMG", width="medium")
 
-        # Colonnes à afficher en priorité
-        cols_to_show = ["Pseudo", "Gene_symbol", "hgvs.c", "ACMG_Class", "patho_score", "Variant_effect", "Allelic_ratio", "Depth", "Fréquence_Cohorte", "link_varsome"]
-        # Filtrer pour ne garder que celles qui existent vraiment
-        final_cols = [c for c in cols_to_show if c in df_res.columns]
-        
-        st.dataframe(df_res[final_cols], use_container_width=True, column_config=col_config, height=600)
+        # 3. Logique d'affichage
+        if show_all_cols:
+            # Si la case est cochée, on envoie TOUT le dataframe 'df_res'
+            # On place quand même les colonnes importantes en premier pour le confort
+            priority_cols = ["Pseudo", "Gene_symbol", "hgvs.c", "patho_score", "ACMG_Class", "link_varsome"]
+            # On cherche quelles colonnes prioritaires existent vraiment
+            existing_priority = [c for c in priority_cols if c in df_res.columns]
+            # Les autres colonnes sont "le reste"
+            other_cols = [c for c in df_res.columns if c not in existing_priority]
+            
+            # On réorganise : Priorité d'abord + le reste ensuite
+            final_df = df_res[existing_priority + other_cols]
+            
+            st.dataframe(
+                final_df, 
+                use_container_width=True, 
+                column_config=col_config, 
+                height=700
+            )
+        else:
+            # Si la case n'est PAS cochée, on garde la vue "épurée"
+            cols_to_show = ["Pseudo", "Gene_symbol", "hgvs.c", "ACMG_Class", "patho_score", "Variant_effect", "Allelic_ratio", "Depth", "Fréquence_Cohorte", "link_varsome", "link_gnomad"]
+            final_cols = [c for c in cols_to_show if c in df_res.columns]
+            
+            st.dataframe(
+                df_res[final_cols], 
+                use_container_width=True, 
+                column_config=col_config, 
+                height=600
+            )
         
         st.download_button(
-            "💾 Télécharger les résultats (TSV)", 
+            "💾 Télécharger les résultats complets (TSV)", 
             df_res.to_csv(sep="\t", index=False).encode('utf-8'), 
             "variants_filtered.tsv",
             mime="text/csv"
