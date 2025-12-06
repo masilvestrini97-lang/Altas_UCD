@@ -1,6 +1,7 @@
 import os
 import io
 import re
+import glob
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -12,7 +13,7 @@ from scipy.stats import hypergeom
 # 1. CONFIGURATION & OUTILS
 # ---------------------------------------
 
-st.set_page_config(page_title="NGS ATLAS Explorer v7.0", layout="wide", page_icon="🧬")
+st.set_page_config(page_title="NGS ATLAS Explorer v8.0", layout="wide", page_icon="🧬")
 
 # --- Fonctions utilitaires ---
 
@@ -22,53 +23,50 @@ def clean_text(val):
 
 def extract_ref_alt_chr(df):
     """
-    Tente de créer/nettoyer les colonnes Chromosome, Ref, Alt si elles sont absentes
-    mais présentes dans une colonne 'Variant' (ex: 1:1234:A>G ou chr1:1234:A:G).
+    Tente de créer/nettoyer les colonnes Chromosome, Ref, Alt si elles sont absentes.
     """
     # 1. Chromosome
     if "Chromosome" not in df.columns and "Chr" in df.columns:
         df["Chromosome"] = df["Chr"]
     
-    # Si toujours pas de Chr, tentative extraction depuis Variant
     if "Chromosome" not in df.columns and "Variant" in df.columns:
-        # Suppose format "chr1:..." ou "1:..."
+        # Format attendu: "1:1234:A>G" ou "chr1:..."
         df["Chromosome"] = df["Variant"].astype(str).str.split(r'[:_-]', n=1, expand=True)[0]
 
-    # Nettoyage Chromosome (standardisation 1, 2, ..., X, Y)
     if "Chromosome" in df.columns:
         df["Chromosome"] = df["Chromosome"].astype(str).str.replace("chr", "", case=False).str.strip()
 
     # 2. Ref / Alt
+    # On cherche d'abord dans 'Variant' si Ref/Alt n'existent pas
     if ("Ref" not in df.columns or "Alt" not in df.columns) and "Variant" in df.columns:
-        # Essai format "Ref>Alt" (ex: "G>T") à la fin de la string
-        # Regex simple qui cherche [ACGT]>[ACGT] ou [ACGT]:[ACGT]
+        # Cherche pattern [ACGT]>[ACGT] ou [ACGT]:[ACGT] à la fin
         extracted = df["Variant"].astype(str).str.extract(r'([ACGT]+)[>:/]([ACGT]+)$', flags=re.IGNORECASE)
         if not extracted.isna().all().all():
             if "Ref" not in df.columns: df["Ref"] = extracted[0].str.upper()
             if "Alt" not in df.columns: df["Alt"] = extracted[1].str.upper()
-
+    
     return df
 
 @st.cache_data
 def load_variants(uploaded_file, sep_guess="auto"):
     if uploaded_file is None: return None
     if sep_guess == "auto":
+        # Lecture d'un échantillon pour deviner le séparateur
         sample = uploaded_file.read(4096).decode("utf-8", errors="ignore")
         uploaded_file.seek(0)
         sep = ";" if ";" in sample and "," not in sample else ("\t" if "\t" in sample else ",")
     else: sep = sep_guess
     try:
-        # on_bad_lines='skip' pour éviter le crash sur une ligne malformée
+        # 'on_bad_lines' permet de sauter les lignes mal formées sans crasher
         df = pd.read_csv(uploaded_file, sep=sep, dtype=str, on_bad_lines='skip')
         df = df.replace('"', '', regex=True)
-        # Prétraitement structurel
+        # Nettoyage et extraction colonnes manquantes
         df = extract_ref_alt_chr(df)
         return df
     except Exception as e:
         st.error(f"Erreur lecture : {e}")
         return None
 
-# Fonctions pour générer les URLs
 def make_varsome_link(variant_str):
     try:
         v = str(variant_str).replace(">", ":")
@@ -103,11 +101,11 @@ def apply_filtering_and_scoring(
 
     df["Gene_symbol"] = df["Gene_symbol"].str.upper().str.replace(" ", "")
 
-    # Remplissage
+    # Normalisation des colonnes texte
     for col in ["Variant_effect", "Putative_impact", "Clinvar_significance"]:
         if col in df.columns: df[col] = df[col].fillna("Non Renseigné")
 
-    # Fréquence Interne
+    # Fréquence Cohorte (Interne)
     if "Pseudo" in df.columns and "Variant" in df.columns:
         tot = df["Pseudo"].nunique()
         cts = df.groupby("Variant")["Pseudo"].nunique()
@@ -122,8 +120,8 @@ def apply_filtering_and_scoring(
     for c in cols_num:
         if c in df.columns: df[c] = pd.to_numeric(df[c], errors="coerce")
     
+    # Tentative de récupération Alt_depth si total absent
     if "Alt_depth_total" not in df.columns and "Alt_depth" in df.columns:
-        # Parfois Alt_depth est "12,0", on prend le premier
         df["Alt_depth_total"] = df["Alt_depth"].astype(str).str.split(',').str[0].str.split(' ').str[0]
         df["Alt_depth_total"] = pd.to_numeric(df["Alt_depth_total"], errors='coerce').fillna(0)
 
@@ -159,7 +157,7 @@ def apply_filtering_and_scoring(
         df = df[df["CADD_phred"] >= min_cadd]
     logs.append({"Etape": "9. CADD", "Restants": len(df), "Perdus": last_count - len(df)}); last_count = len(df)
 
-    # --- GENERATION DES LIENS ---
+    # --- LIENS ---
     if "Variant" in df.columns:
         df["link_varsome"] = df["Variant"].apply(make_varsome_link)
         df["link_gnomad"] = df["Variant"].apply(make_gnomad_link)
@@ -208,11 +206,11 @@ def apply_filtering_and_scoring(
 
     df["patho_score"] = df["score_putative"] + df["score_cadd"] + df["score_clinvar"] + df["msc_weight"]
 
-    # --- ACMG ---
+    # --- ACMG (Simplifié) ---
     if use_acmg:
         def compute_acmg_class(row):
             eff = str(row.get("Variant_effect", "")).lower()
-            pvs1 = any(x in eff for x in ["stopgained", "frameshift", "splice_acceptor", "splice_donor"])
+            pvs1 = any(x in eff for x in ["stopgained", "frameshift", "splice_acceptor", "splice_donor", "startlost", "stoplost"])
             af = row.get("gnomad_exomes_NFE_AF", np.nan)
             pm2 = pd.isna(af) or (af < 0.0001)
             cadd = row.get("CADD_phred", 0)
@@ -258,23 +256,26 @@ def apply_filtering_and_scoring(
 # 3. ANALYSE PATHWAYS
 # ---------------------------------------
 
-def parse_pathway_files(uploaded_files):
+def load_local_pathways(directory="."):
+    """Charge automatiquement les fichiers .gmt du répertoire courant"""
     pathways = {}
-    if not uploaded_files: return pathways
-    for up_file in uploaded_files:
-        content = up_file.read().decode("utf-8", errors="ignore")
-        fname = up_file.name.lower()
-        if fname.endswith(".gmt"):
-            for line in content.splitlines():
-                parts = line.strip().split("\t")
-                if len(parts) >= 3:
-                    pw = parts[0].strip()
-                    genes = [g.strip().upper() for g in parts[2:] if g.strip()]
-                    if pw and genes:
-                        if pw not in pathways: pathways[pw] = []
-                        pathways[pw].extend(genes)
+    gmt_files = glob.glob(os.path.join(directory, "*.gmt"))
+    for fpath in gmt_files:
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    parts = line.strip().split("\t")
+                    if len(parts) >= 3:
+                        pw = parts[0].strip()
+                        genes = [g.strip().upper() for g in parts[2:] if g.strip()]
+                        if pw and genes:
+                            if pw not in pathways: pathways[pw] = []
+                            pathways[pw].extend(genes)
+        except Exception: pass
+    
+    # Dédoublonnage des gènes par pathway
     for k in pathways: pathways[k] = list(set(pathways[k]))
-    return pathways
+    return pathways, [os.path.basename(f) for f in gmt_files]
 
 @st.cache_data
 def compute_enrichment(df, pathway_genes):
@@ -315,7 +316,7 @@ def compute_enrichment(df, pathway_genes):
 # 4. INTERFACE
 # ---------------------------------------
 
-st.title("🧬 NGS ATLAS Explorer v7.0")
+st.title("🧬 NGS ATLAS Explorer v8.0")
 st.markdown("---")
 
 if "analysis_done" not in st.session_state:
@@ -368,8 +369,9 @@ with st.sidebar:
             use_msc = st.checkbox("MSC", False)
             msc_file = st.file_uploader("Fichier MSC", type=["tsv"])
 
+        # Section Pathways modifiée : plus besoin d'upload obligatoire
         st.header("3. Pathways")
-        path_files = st.file_uploader("Fichiers GMT", accept_multiple_files=True)
+        st.info("Les fichiers .gmt du dossier local seront chargés automatiquement.")
         
         submitted = st.form_submit_button("🚀 LANCER L'ANALYSE")
 
@@ -393,7 +395,10 @@ if submitted and df_raw is not None:
         st.session_state["logs"] = logs
         st.session_state["use_acmg"] = use_acmg
         
-        user_pathways = parse_pathway_files(path_files)
+        # Chargement auto des pathways
+        user_pathways, file_names = load_local_pathways()
+        st.session_state["gmt_files"] = file_names
+        
         if user_pathways:
             df_enr = compute_enrichment(res, user_pathways)
             st.session_state["df_enr"] = df_enr
@@ -410,6 +415,7 @@ if st.session_state["analysis_done"]:
     logs = st.session_state["logs"]
     df_enr = st.session_state.get("df_enr", pd.DataFrame())
     acmg_active = st.session_state.get("use_acmg", False)
+    gmt_names = st.session_state.get("gmt_files", [])
 
     # --- KPI HEADER ---
     k1, k2, k3 = st.columns(3)
@@ -417,15 +423,20 @@ if st.session_state["analysis_done"]:
     k2.metric("Final", n_fin)
     ratio = round(n_fin/n_ini*100, 2) if n_ini > 0 else 0
     k3.metric("Ratio", f"{ratio}%")
+    
+    if gmt_names:
+        st.caption(f"📚 Pathways chargés depuis : {', '.join(gmt_names)}")
+    else:
+        st.caption("⚠️ Aucun fichier .gmt trouvé dans le dossier.")
 
     # --- TABS ---
     tabs = st.tabs([
         "📋 Tableau", 
         "🔍 Inspecteur", 
-        "🧩 Corrélation", 
+        "🧩 Corrélation & OncoPrint", 
         "📊 Spectre Mutationnel", 
         "📍 Lollipops", 
-        "📈 QC & Chromosomes", 
+        "📈 QC", 
         "🧬 Pathways"
     ])
 
@@ -437,7 +448,6 @@ if st.session_state["analysis_done"]:
             "Allelic_ratio": st.column_config.NumberColumn("VAF", format="%.3f"),
             "gnomad_exomes_NFE_AF": st.column_config.NumberColumn("gnomAD", format="%.5f"),
             "link_varsome": st.column_config.LinkColumn("Varsome", display_text="🔗 Lien"),
-            "link_gnomad": st.column_config.LinkColumn("gnomAD", display_text="🔗 Lien"),
         }
         if acmg_active:
             col_config["ACMG_Class"] = st.column_config.TextColumn("ACMG")
@@ -468,45 +478,42 @@ if st.session_state["analysis_done"]:
 
     # TAB 3: Corrélation & OncoPrint
     with tabs[2]:
-        st.subheader("🧩 Corrélation & Co-occurrence")
+        st.subheader("🧩 OncoPrint & Heatmap")
         if "Pseudo" in df_res.columns and "Gene_symbol" in df_res.columns:
-            # Sélecteur de mode
-            view_mode = st.radio("Type de visualisation", ["Heatmap Simple", "OncoPrint"], horizontal=True)
+            view_mode = st.radio("Mode", ["Heatmap (Corrélation)", "OncoPrint (Types de mutations)"], horizontal=True)
             
             top_genes = df_res["Gene_symbol"].value_counts().head(30).index.tolist()
             df_heat = df_res[df_res["Gene_symbol"].isin(top_genes)].copy()
             
             if not df_heat.empty:
-                if view_mode == "Heatmap Simple":
+                if view_mode == "Heatmap (Corrélation)":
                     matrix = df_heat.pivot_table(index="Pseudo", columns="Gene_symbol", aggfunc='size', fill_value=0)
-                    matrix[matrix > 0] = 1 # Binarisation
-                    # Correlation matrix
+                    matrix[matrix > 0] = 1 
                     co_occ = matrix.T.dot(matrix)
                     fig_corr = px.imshow(co_occ, text_auto=True, color_continuous_scale="Viridis", title="Co-occurrence (Top 30 gènes)")
                     st.plotly_chart(fig_corr, use_container_width=True)
                     
                 else: # OncoPrint
-                    # Mapping des effets pour les couleurs
-                    # Priorité: Stop/Frameshift (3) > Splicing (2) > Missense (1) > Autre (0.5)
                     def get_effect_score(eff):
-                        e = str(eff).lower()
-                        if "stop" in e or "frameshift" in e: return 3
+                        e = str(eff).lower().replace("_", "")
+                        # Priorité : Stop/Frame (3) > Splice (2) > Missense (1) > Autre (0.5)
+                        if any(x in e for x in ["stop", "frameshift", "nonsense"]): return 3
                         if "splice" in e: return 2
                         if "missense" in e: return 1
                         return 0.5
                     
                     df_heat["Effet_Code"] = df_heat["Variant_effect"].apply(get_effect_score)
-                    
-                    # On garde le pire effet par paire Gene/Patient
                     matrix_onco = df_heat.pivot_table(index="Gene_symbol", columns="Pseudo", values="Effet_Code", aggfunc='max', fill_value=0)
                     
-                    # Custom colorscale discrète
+                    # CORRECTION MAPPING COULEURS
+                    # Valeurs: 0, 0.5, 1, 2, 3
+                    # Plotly normalize: 0->0, 0.5->0.166, 1->0.33, 2->0.66, 3->1.0
                     colors = [
-                        [0.0, "white"], [0.2, "white"],     # 0: Rien
-                        [0.2, "lightgrey"], [0.4, "lightgrey"], # 0.5: Autre
-                        [0.4, "blue"], [0.6, "blue"],       # 1: Missense
-                        [0.6, "orange"], [0.8, "orange"],   # 2: Splicing
-                        [0.8, "red"], [1.0, "red"]          # 3: Tronquant
+                        [0.0, "white"], [0.05, "white"],      # 0
+                        [0.05, "lightgrey"], [0.25, "lightgrey"], # 0.5 (Autre)
+                        [0.25, "blue"], [0.5, "blue"],        # 1 (Missense)
+                        [0.5, "orange"], [0.8, "orange"],     # 2 (Splicing)
+                        [0.8, "red"], [1.0, "red"]            # 3 (Tronquant)
                     ]
                     
                     fig_onco = go.Figure(data=go.Heatmap(
@@ -514,77 +521,70 @@ if st.session_state["analysis_done"]:
                         x=matrix_onco.columns,
                         y=matrix_onco.index,
                         colorscale=colors,
-                        showscale=False
+                        showscale=False,
+                        zmin=0, zmax=3
                     ))
-                    fig_onco.update_layout(title="OncoPrint (Rouge=Tronquant, Orange=Splice, Bleu=Missense)")
+                    fig_onco.update_layout(title="OncoPrint")
                     st.plotly_chart(fig_onco, use_container_width=True)
-                    st.info("Légende : Rouge = Stop/Frameshift | Orange = Splicing | Bleu = Missense | Gris = Autre")
+                    st.info("Rouge = Stop/Frameshift | Orange = Splicing | Bleu = Missense | Gris = Autre")
         else:
-            st.warning("Données insuffisantes (Colonnes Pseudo/Gene manquantes).")
+            st.warning("Données insuffisantes.")
 
-    # TAB 4: Spectre Mutationnel (NOUVEAU)
+    # TAB 4: Spectre Mutationnel (PAR PATIENT)
     with tabs[3]:
-        st.subheader("📊 Spectre Mutationnel (Transitions / Transversions)")
-        if "Ref" in df_res.columns and "Alt" in df_res.columns:
+        st.subheader("📊 Spectre Mutationnel par Patient")
+        if "Ref" in df_res.columns and "Alt" in df_res.columns and "Pseudo" in df_res.columns:
             df_mut = df_res.copy()
             df_mut["mutation"] = df_mut["Ref"] + ">" + df_mut["Alt"]
             
-            # Mapping vers les 6 classes canoniques (Pyrimidine C/T)
             trans_map = {
                 'G>T': 'C>A', 'G>C': 'C>G', 'G>A': 'C>T',
                 'A>T': 'T>A', 'A>G': 'T>C', 'A>C': 'T>G'
             }
-            # On applique le mapping, si pas dans la map on garde l'original (pour C>A etc)
             df_mut["canon_mut"] = df_mut["mutation"].apply(lambda x: trans_map.get(x, x))
-            
-            # Filtre pour ne garder que les variantes SNV classiques
             valid_snvs = ['C>A', 'C>G', 'C>T', 'T>A', 'T>C', 'T>G']
             df_mut = df_mut[df_mut["canon_mut"].isin(valid_snvs)]
             
             if not df_mut.empty:
-                counts = df_mut["canon_mut"].value_counts().reset_index()
-                counts.columns = ["Mutation", "Count"]
+                # Group by Pseudo + Mutation Type
+                counts = df_mut.groupby(["Pseudo", "canon_mut"]).size().reset_index(name="Count")
                 
-                # Couleurs COSMIC standard
                 colors = {
-                    'C>A': '#1ebff0', # Bleu
-                    'C>G': '#050708', # Noir
-                    'C>T': '#e62725', # Rouge
-                    'T>A': '#cbcacb', # Gris
-                    'T>C': '#a1cf64', # Vert
-                    'T>G': '#edc8c5'  # Rose
+                    'C>A': '#1ebff0', 'C>G': '#050708', 'C>T': '#e62725',
+                    'T>A': '#cbcacb', 'T>C': '#a1cf64', 'T>G': '#edc8c5'
                 }
                 
+                # Stacked Bar Chart par patient
                 fig_spec = px.bar(
-                    counts, x="Mutation", y="Count", color="Mutation",
+                    counts, x="Pseudo", y="Count", color="canon_mut",
                     color_discrete_map=colors,
-                    title="Distribution des substitutions (SNV)"
+                    title="Distribution des substitutions par Patient",
+                    category_orders={"canon_mut": valid_snvs}
                 )
                 st.plotly_chart(fig_spec, use_container_width=True)
             else:
-                st.warning("Aucun SNV standard détecté pour le spectre.")
+                st.warning("Aucun SNV standard trouvé.")
         else:
-            st.warning("Colonnes 'Ref' et 'Alt' introuvables ou impossible à déduire.")
+            st.warning("Colonnes 'Ref', 'Alt' ou 'Pseudo' manquantes.")
 
-    # TAB 5: Lollipops (NOUVEAU)
+    # TAB 5: Lollipops (CORRIGÉ)
     with tabs[4]:
         st.subheader("📍 Lollipop Plot")
-        # On a besoin d'une colonne protéine (HGVSp ou Protein_position)
-        # On cherche souvent 'HGVSp' ou 'Protein_change'
-        prot_col = None
-        for c in ["HGVSp", "Protein_change", "AA_change"]:
-            if c in df_res.columns:
-                prot_col = c
-                break
+        # Recherche colonnes possibles pour la protéine
+        # On ajoute hgvs.p et hgvs.p (avec point ou pas)
+        prot_cols = ["hgvs.p", "HGVSp", "Protein_change", "AA_change", "hgvsp"]
+        found_col = next((c for c in prot_cols if c in df_res.columns), None)
         
-        if prot_col:
+        if found_col:
             genes_avail = sorted(df_res["Gene_symbol"].unique())
             sel_gene_lol = st.selectbox("Choisir un gène :", genes_avail)
             
             if sel_gene_lol:
                 df_lol = df_res[df_res["Gene_symbol"] == sel_gene_lol].copy()
-                # Extraction position: cherche p.Ala123... -> 123
-                df_lol["AA_pos"] = df_lol[prot_col].astype(str).str.extract(r'(\d+)')[0]
+                
+                # Extraction améliorée : cherche le premier groupe de chiffres
+                # Ex: p.Ala123Val -> 123 | pala201val -> 201
+                df_lol["AA_pos"] = df_lol[found_col].astype(str).str.extract(r'(\d+)')[0]
                 df_lol["AA_pos"] = pd.to_numeric(df_lol["AA_pos"], errors="coerce")
                 
                 df_lol = df_lol.dropna(subset=["AA_pos"])
@@ -595,12 +595,11 @@ if st.session_state["analysis_done"]:
                         df_lol, x="AA_pos", y="patho_score",
                         color="Variant_effect",
                         size="patho_score",
-                        hover_data=["Pseudo", prot_col],
+                        hover_data=["Pseudo", found_col],
                         range_x=[0, max_pos*1.1],
-                        range_y=[0, df_lol["patho_score"].max()*1.2],
-                        title=f"Distribution des mutations sur {sel_gene_lol}"
+                        range_y=[0, max(df_lol["patho_score"].max(), 1)*1.2],
+                        title=f"Mutations sur {sel_gene_lol} (Source: {found_col})"
                     )
-                    # Ajout des "tiges"
                     for _, row in df_lol.iterrows():
                         fig_lol.add_shape(
                             type="line",
@@ -608,43 +607,33 @@ if st.session_state["analysis_done"]:
                             x1=row["AA_pos"], y1=row["patho_score"],
                             line=dict(color="grey", width=1)
                         )
-                    fig_lol.update_layout(xaxis_title="Position Acide Aminé")
+                    fig_lol.update_layout(xaxis_title="Position AA")
                     st.plotly_chart(fig_lol, use_container_width=True)
                 else:
-                    st.warning(f"Impossible d'extraire des positions protéiques pour {sel_gene_lol}.")
+                    st.warning(f"Pas de positions extraites pour {sel_gene_lol} (Vérifiez le format de {found_col}).")
         else:
-            st.warning("Colonne HGVSp manquante, impossible de générer les lollipops.")
+            st.warning("Colonne protéique (ex: hgvs.p) introuvable.")
 
-    # TAB 6: QC & Chromosomes
+    # TAB 6: QC
     with tabs[5]:
         st.subheader("📈 Contrôle Qualité")
         if not df_res.empty:
-            # QC Classique
             c1, c2 = st.columns(2)
             with c1: st.plotly_chart(px.scatter(df_res, x="Depth", y="Allelic_ratio", color="ACMG_Class" if acmg_active else "Putative_impact", log_x=True, title="Depth vs VAF"), use_container_width=True)
-            with c2: st.plotly_chart(px.histogram(df_res, x="internal_freq", title="Fréquence Cohorte (Histogramme)"), use_container_width=True)
-
-            st.markdown("---")
-            # Distribution Chromosomique
-            st.subheader("Distribution Chromosomique")
-            if "Chromosome" in df_res.columns:
-                # Tri naturel des chromosomes
-                chr_list = [str(i) for i in range(1, 23)] + ["X", "Y", "M", "MT"]
-                df_res["Chr_Sorted"] = pd.Categorical(df_res["Chromosome"].astype(str), categories=chr_list, ordered=True)
-                
-                counts_chr = df_res["Chr_Sorted"].value_counts().sort_index()
-                fig_chr = px.bar(counts_chr, title="Nombre de variants par Chromosome")
-                st.plotly_chart(fig_chr, use_container_width=True)
-            else:
-                st.warning("Information Chromosome manquante.")
+            with c2: 
+                if "Chromosome" in df_res.columns:
+                    chr_list = [str(i) for i in range(1, 23)] + ["X", "Y", "M", "MT"]
+                    df_res["Chr_Sorted"] = pd.Categorical(df_res["Chromosome"].astype(str), categories=chr_list, ordered=True)
+                    counts_chr = df_res["Chr_Sorted"].value_counts().sort_index()
+                    st.plotly_chart(px.bar(counts_chr, title="Variants par Chromosome"), use_container_width=True)
 
     # TAB 7: Pathways
     with tabs[6]:
         if df_enr.empty:
-            st.info("Chargez des fichiers .gmt pour voir les pathways.")
+            st.info("Aucun enrichissement détecté ou fichiers .gmt manquants.")
         else:
-            top = df_enr.sort_values("FDR").head(15)
-            st.plotly_chart(px.bar(top, x="minus_log10_FDR", y="pathway", orientation='h', color="k_overlap"), use_container_width=True)
+            top = df_enr.sort_values("FDR").head(20)
+            st.plotly_chart(px.bar(top, x="minus_log10_FDR", y="pathway", orientation='h', color="k_overlap", title="Top Pathways Enrichis"), use_container_width=True)
             st.dataframe(df_enr)
 
 elif not submitted:
