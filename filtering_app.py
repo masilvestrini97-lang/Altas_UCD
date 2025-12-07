@@ -509,14 +509,32 @@ if st.session_state["analysis_done"]:
     ])
 
     # --- TAB 1: AGGRID & RAPPORT ---
+# --- TAB 1: AGGRID & RAPPORT ---
     with tabs[0]:
         st.subheader("📋 Explorateur Interactif")
         
-        gb = GridOptionsBuilder.from_dataframe(df_res)
+        # 1. Création de la colonne Lien HTML (AVANT de créer le builder)
+        if "link_varsome" in df_res.columns:
+            df_res["Varsome_HTML"] = df_res["link_varsome"].apply(lambda x: f'<a href="{x}" target="_blank">🔗</a>' if x else "")
+        
+        # 2. Réorganisation des colonnes (Tri) via Pandas directement
+        # Liste des colonnes prioritaires
+        desired_order = ["Pseudo", "Gene_symbol", "Variant", "Varsome_HTML", "patho_score", "ACMG_Class", "Allelic_ratio"]
+        # On garde celles qui existent vraiment dans le fichier
+        existing_priority = [c for c in desired_order if c in df_res.columns]
+        # On ajoute le reste
+        other_cols = [c for c in df_res.columns if c not in existing_priority and c != "link_varsome" and c != "link_gnomad"]
+        
+        # On réorganise le DataFrame final
+        df_display = df_res[existing_priority + other_cols].copy()
+
+        # 3. Configurer AgGrid avec le DataFrame déjà trié
+        gb = GridOptionsBuilder.from_dataframe(df_display)
         gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
         gb.configure_side_bar() 
         gb.configure_selection('multiple', use_checkbox=True, groupSelectsChildren="Group checkbox select children") 
         
+        # 4. Styles et Formats
         cellsytle_jscode = JsCode("""
         function(params) {
             if (params.value >= 10) {
@@ -530,20 +548,18 @@ if st.session_state["analysis_done"]:
         """)
         gb.configure_column("patho_score", cellStyle=cellsytle_jscode)
         
-        if "link_varsome" in df_res.columns:
-            df_res["Varsome_HTML"] = df_res["link_varsome"].apply(lambda x: f'<a href="{x}" target="_blank">🔗</a>' if x else "")
+        if "Varsome_HTML" in df_display.columns:
             gb.configure_column("Varsome_HTML", headerName="Lien", cellRenderer="html", width=70)
-            gb.configure_column("link_varsome", hide=True)
-            gb.configure_column("link_gnomad", hide=True)
+        
+        # Masquage des colonnes techniques si elles sont restées (par sécurité)
+        if "link_varsome" in df_display.columns: gb.configure_column("link_varsome", hide=True)
+        if "link_gnomad" in df_display.columns: gb.configure_column("link_gnomad", hide=True)
 
-        cols_order = ["Pseudo", "Gene_symbol", "Variant", "Varsome_HTML", "patho_score", "ACMG_Class", "Allelic_ratio"]
-        other_cols = [c for c in df_res.columns if c not in cols_order and c != "Varsome_HTML"]
-        gb.configure_grid_options(columnDefs=[{"field": c} for c in cols_order + other_cols])
-
+        # Construction finale (C'est ici que ça plantait avant)
         gridOptions = gb.build()
         
         grid_response = AgGrid(
-            df_res,
+            df_display,
             gridOptions=gridOptions,
             data_return_mode='AS_INPUT', 
             update_mode='MODEL_CHANGED', 
@@ -562,6 +578,7 @@ if st.session_state["analysis_done"]:
 
         st.markdown("---")
         
+        # --- Zone Export Rapport ---
         st.subheader("📄 Générateur de Rapport")
         c_rep1, c_rep2 = st.columns([3, 1])
         with c_rep1:
