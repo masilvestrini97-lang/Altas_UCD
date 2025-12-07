@@ -3,7 +3,7 @@ pandas
 numpy
 plotly
 scipy
-streamlit-aggrid
-fpdf
 requests
+st-aggrid
 streamlit-agraph
+fpdf
