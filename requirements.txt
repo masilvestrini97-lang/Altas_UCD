@@ -4,6 +4,6 @@ numpy
 plotly
 scipy
 requests
-st-aggrid
+streamlit-aggrid
 streamlit-agraph
 fpdf
