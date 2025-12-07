@@ -1,8 +1,7 @@
 streamlit
 pandas
 numpy
-matplotlib
-seaborn
-scipy
-reportlab
 plotly
+scipy
+streamlit-aggrid
+fpdf
