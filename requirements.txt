@@ -5,3 +5,5 @@ plotly
 scipy
 streamlit-aggrid
 fpdf
+requests
+streamlit-agraph
