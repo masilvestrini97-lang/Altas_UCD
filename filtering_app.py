@@ -2,8 +2,7 @@ import os
 import io
 import re
 import glob
-import base64
-import requests # Pour l'API STRING
+import requests  # Pour l'API STRING
 from datetime import datetime
 import numpy as np
 import pandas as pd
@@ -12,16 +11,16 @@ import plotly.express as px
 import plotly.graph_objects as go
 from scipy.stats import hypergeom
 
-# --- NOUVEAUX IMPORTS ---
-from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
+# --- IMPORTS TIERS ---
+from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 from fpdf import FPDF
-from streamlit_agraph import agraph, Node, Edge, Config # Pour le graphe PPI
+from streamlit_agraph import agraph, Node, Edge, Config  # Pour le graphe PPI
 
 # ---------------------------------------
 # 1. CONFIGURATION & OUTILS
 # ---------------------------------------
 
-st.set_page_config(page_title="NGS ATLAS Explorer v10.0", layout="wide", page_icon="🧬")
+st.set_page_config(page_title="NGS ATLAS Explorer v10.1", layout="wide", page_icon="🧬")
 
 # --- Fonctions utilitaires ---
 
@@ -79,7 +78,7 @@ def make_gnomad_link(variant_str):
         return f"https://gnomad.broadinstitute.org/variant/{v}?dataset=gnomad_r2_1"
     except: return ""
 
-# --- Fonction API STRING DB (Nouveau) ---
+# --- Fonction API STRING DB ---
 @st.cache_data
 def get_string_network(gene_symbol, limit=10):
     """
@@ -89,7 +88,7 @@ def get_string_network(gene_symbol, limit=10):
     params = {
         "identifiers": gene_symbol,
         "species": 9606,  # Homo sapiens
-        "limit": limit,    # Nombre de partenaires max
+        "limit": limit,   # Nombre de partenaires max
         "network_type": "functional" # ou 'physical'
     }
     
@@ -97,11 +96,11 @@ def get_string_network(gene_symbol, limit=10):
         response = requests.get(url, params=params)
         if response.status_code == 200:
             return response.json()
-    except Exception as e:
+    except Exception:
         return []
     return []
 
-# --- Fonction de Rapport PDF ---
+# --- Fonction de Rapport PDF (CORRIGÉE) ---
 
 def create_pdf_report(patient_id, df_variants, user_comments=""):
     class PDF(FPDF):
@@ -152,6 +151,7 @@ def create_pdf_report(patient_id, df_variants, user_comments=""):
             pdf.cell(col_w[i], 10, d, 1, 0, 'C')
         pdf.ln()
 
+    # Retourne les bytes (compatible st.download_button)
     return pdf.output(dest='S').encode('latin-1', 'ignore')
 
 # ---------------------------------------
@@ -388,7 +388,7 @@ def compute_enrichment(df, pathway_genes):
 # 4. INTERFACE
 # ---------------------------------------
 
-st.title("🧬 NGS ATLAS Explorer v10.0")
+st.title("🧬 NGS ATLAS Explorer v10.1")
 st.markdown("---")
 
 if "analysis_done" not in st.session_state:
@@ -505,12 +505,10 @@ if st.session_state["analysis_done"]:
         "📍 Lollipops", 
         "📈 QC", 
         "🧬 Pathways",
-        "🕸️ PPI" # Nouvel onglet
+        "🕸️ PPI"
     ])
 
     # --- TAB 1: AGGRID & RAPPORT ---
-# --- TAB 1: AGGRID & RAPPORT ---
-   # --- TAB 1: AGGRID & RAPPORT ---
     with tabs[0]:
         st.subheader("📋 Explorateur Interactif")
         
@@ -518,7 +516,7 @@ if st.session_state["analysis_done"]:
         if "link_varsome" in df_res.columns:
             df_res["Varsome_HTML"] = df_res["link_varsome"].apply(lambda x: f'<a href="{x}" target="_blank">🔗</a>' if x else "")
         
-        # 2. Réorganisation des colonnes (Tri via Pandas)
+        # 2. Réorganisation des colonnes
         desired_order = ["Pseudo", "Gene_symbol", "Variant", "Varsome_HTML", "patho_score", "ACMG_Class", "Allelic_ratio"]
         existing_priority = [c for c in desired_order if c in df_res.columns]
         other_cols = [c for c in df_res.columns if c not in existing_priority and c != "link_varsome" and c != "link_gnomad"]
@@ -531,15 +529,10 @@ if st.session_state["analysis_done"]:
         gb.configure_side_bar() 
         gb.configure_selection('multiple', use_checkbox=True, groupSelectsChildren="Group checkbox select children") 
         
-        # --- MODIFICATION POUR LA LARGEUR DES COLONNES ---
-        # A. Définir une largeur minimale par défaut pour TOUTES les colonnes (ex: 50px)
         gb.configure_default_column(resizable=True, minWidth=100, filterable=True, sortable=True)
-
-        # B. Forcer des largeurs spécifiques pour les colonnes importantes
-        gb.configure_column("Variant", minWidth=100)       # Le variant a besoin de place
-        gb.configure_column("Gene_symbol", minWidth=100)   # Le gène un peu moins
+        gb.configure_column("Variant", minWidth=100)
+        gb.configure_column("Gene_symbol", minWidth=100)
         gb.configure_column("patho_score", minWidth=100)
-        # -------------------------------------------------
 
         # 4. Styles couleurs
         cellsytle_jscode = JsCode("""
@@ -558,7 +551,6 @@ if st.session_state["analysis_done"]:
         if "Varsome_HTML" in df_display.columns:
             gb.configure_column("Varsome_HTML", headerName="Lien", cellRenderer="html")
         
-        # Masquage technique
         if "link_varsome" in df_display.columns: gb.configure_column("link_varsome", hide=True)
         if "link_gnomad" in df_display.columns: gb.configure_column("link_gnomad", hide=True)
 
@@ -569,7 +561,7 @@ if st.session_state["analysis_done"]:
             gridOptions=gridOptions,
             data_return_mode='AS_INPUT', 
             update_mode='MODEL_CHANGED', 
-            fit_columns_on_grid_load=False, # Important : False permet le scroll horizontal
+            fit_columns_on_grid_load=False,
             theme='streamlit', 
             enable_enterprise_modules=False,
             height=600,
@@ -584,28 +576,36 @@ if st.session_state["analysis_done"]:
 
         st.markdown("---")
         
-        # --- Zone Export Rapport ---
+        # --- Zone Export Rapport (MODIFIÉE) ---
         st.subheader("📄 Générateur de Rapport")
         c_rep1, c_rep2 = st.columns([3, 1])
         with c_rep1:
             nb_sel = len(df_selected) if not df_selected.empty else 0
             st.info(f"**{nb_sel} variants sélectionnés** pour le rapport.")
             user_comment = st.text_area("Conclusion / Commentaire clinique :", "Variants compatibles avec le phénotype...")
+        
         with c_rep2:
             st.write("##")
-            if st.button("Télécharger Rapport PDF"):
-                pat_id = "Multi-Patients"
-                if "Pseudo" in df_selected.columns:
-                    unique_pats = df_selected["Pseudo"].unique()
-                    if len(unique_pats) == 1: pat_id = unique_pats[0]
+            # Logique propre pour Streamlit Cloud : st.download_button
+            pat_id = "Multi-Patients"
+            if "Pseudo" in df_selected.columns:
+                unique_pats = df_selected["Pseudo"].unique()
+                if len(unique_pats) == 1: pat_id = unique_pats[0]
+            
+            try:
+                # Générer le PDF (bytes)
+                pdf_bytes = create_pdf_report(pat_id, df_selected, user_comment)
                 
-                try:
-                    pdf_bytes = create_pdf_report(pat_id, df_selected, user_comment)
-                    b64 = base64.b64encode(pdf_bytes).decode()
-                    href = f'<a href="data:application/octet-stream;base64,{b64}" download="Rapport_{pat_id}.pdf" style="background-color:#FF4B4B;color:white;padding:10px;text-decoration:none;border-radius:5px;">📥 Télécharger le PDF</a>'
-                    st.markdown(href, unsafe_allow_html=True)
-                except Exception as e:
-                    st.error(f"Erreur PDF : {e}")
+                st.download_button(
+                    label="📥 Télécharger le PDF",
+                    data=pdf_bytes,
+                    file_name=f"Rapport_{pat_id}.pdf",
+                    mime="application/pdf",
+                    type="primary"
+                )
+            except Exception as e:
+                st.error(f"Erreur PDF : {e}")
+
     # --- TAB 2: Inspecteur ---
     with tabs[1]:
         st.subheader("🔍 Focus Patient")
@@ -754,9 +754,6 @@ if st.session_state["analysis_done"]:
     with tabs[7]:
         st.subheader("🕸️ Réseau d'Interaction Protéique (STRING DB)")
         
-        
-        # 1. Sélecteur de gène
-        # On récupère tous les gènes uniques du fichier
         all_genes = sorted(df_res["Gene_symbol"].unique())
         
         c_ppi1, c_ppi2 = st.columns([1, 3])
