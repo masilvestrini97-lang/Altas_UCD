@@ -101,57 +101,86 @@ def get_string_network(gene_symbol, limit=10):
     return []
 
 # --- Fonction de Rapport PDF (CORRIGÉE) ---
-
 def create_pdf_report(patient_id, df_variants, user_comments=""):
     class PDF(FPDF):
         def header(self):
-            self.set_font('Arial', 'B', 15)
-            self.cell(0, 10, 'Rapport NGS - Analyse Variants', 0, 1, 'C')
-            self.ln(5)
+            self.set_font('Arial', 'B', 14)
+            self.cell(0, 10, f'Rapport NGS - {patient_id}', 0, 1, 'C')
+            self.ln(2)
         def footer(self):
             self.set_y(-15)
             self.set_font('Arial', 'I', 8)
             self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
 
-    pdf = PDF()
+    # 1. Configuration PAYSAGE ('L' = Landscape)
+    pdf = PDF(orientation='L', unit='mm', format='A4')
     pdf.add_page()
-    pdf.set_font("Arial", size=12)
     
-    # Infos Patient
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 10, f"Patient ID: {patient_id}", 0, 1)
-    pdf.cell(0, 10, f"Date: {datetime.now().strftime('%Y-%m-%d')}", 0, 1)
-    pdf.ln(5)
+    # --- Infos Générales ---
+    pdf.set_font("Arial", 'B', 10)
+    pdf.cell(0, 6, f"Date: {datetime.now().strftime('%Y-%m-%d')} | Variants sélectionnés: {len(df_variants)}", 0, 1)
     
-    # Commentaires
     if user_comments:
         pdf.set_font("Arial", 'I', 10)
-        pdf.multi_cell(0, 10, f"Commentaires: {user_comments}")
-        pdf.ln(5)
+        pdf.multi_cell(0, 6, f"Note clinique : {user_comments}")
+    pdf.ln(5)
 
-    # Tableau Variants (Sélectionnés)
-    pdf.set_font("Arial", 'B', 10)
-    col_w = [35, 55, 20, 35, 35] 
-    headers = ["Gene", "Variant", "Score", "VAF", "ACMG"]
+    # --- Configuration des Colonnes (Nom affiché, Nom technique, Largeur) ---
+    # Total A4 Paysage ~ 277mm utilisables
+    columns_config = [
+        ("Gene", "Gene_symbol", 30),
+        ("Variant", "Variant", 55),
+        ("Effect", "Variant_effect", 50),
+        ("VAF", "Allelic_ratio", 20),
+        ("Depth", "Depth", 20),
+        ("gnomAD", "gnomad_exomes_NFE_AF", 30),
+        ("ACMG", "ACMG_Class", 40)
+    ]
+
+    # --- En-têtes du tableau ---
+    pdf.set_font("Arial", 'B', 9)
+    # Fond gris clair pour l'en-tête
+    pdf.set_fill_color(240, 240, 240)
     
-    for i, h in enumerate(headers):
-        pdf.cell(col_w[i], 10, h, 1, 0, 'C')
+    for label, _, width in columns_config:
+        pdf.cell(width, 8, label, 1, 0, 'C', 1) # Le '1' à la fin active le fill
     pdf.ln()
     
-    pdf.set_font("Arial", size=9)
+    # --- Données ---
+    pdf.set_font("Arial", '', 8)
+    
     for _, row in df_variants.iterrows():
-        gene = str(row.get("Gene_symbol", ""))[:15]
-        var = str(row.get("Variant", ""))[:25]
-        score = str(round(float(row.get("patho_score", 0)), 1))
-        vaf = str(round(float(row.get("Allelic_ratio", 0)), 2))
-        acmg = str(row.get("ACMG_Class", "N/A"))[:15]
-        
-        data = [gene, var, score, vaf, acmg]
-        for i, d in enumerate(data):
-            pdf.cell(col_w[i], 10, d, 1, 0, 'C')
+        for label, col_name, width in columns_config:
+            # Récupération sécurisée de la valeur
+            raw_val = row.get(col_name, "")
+            
+            # Formatage spécifique selon la colonne pour faire propre
+            display_val = str(raw_val)
+            
+            if col_name == "Allelic_ratio":
+                try:
+                    # Afficher 0.25 (arrondi)
+                    display_val = str(round(float(raw_val), 3))
+                except: pass
+            
+            elif col_name == "gnomad_exomes_NFE_AF":
+                try:
+                    val_float = float(raw_val)
+                    if val_float == 0: display_val = "0"
+                    else: display_val = f"{val_float:.4f}" # 4 décimales pour gnomAD
+                except: 
+                    display_val = "" # Vide si pas de donnée
+
+            # Troncature pour éviter que le texte ne dépasse de la case
+            # Environ 1 char tous les 2mm à cette taille de police
+            max_len = int(width / 2) 
+            if len(display_val) > max_len:
+                display_val = display_val[:max_len-2] + ".."
+
+            pdf.cell(width, 8, display_val, 1, 0, 'C')
         pdf.ln()
 
-    # Retourne les bytes (compatible st.download_button)
+    # Retourne les bytes pour st.download_button
     return pdf.output(dest='S').encode('latin-1', 'ignore')
 
 # ---------------------------------------
