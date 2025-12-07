@@ -532,14 +532,14 @@ if st.session_state["analysis_done"]:
         gb.configure_selection('multiple', use_checkbox=True, groupSelectsChildren="Group checkbox select children") 
         
         # --- MODIFICATION POUR LA LARGEUR DES COLONNES ---
-        # A. Définir une largeur minimale par défaut pour TOUTES les colonnes (ex: 160px)
-        gb.configure_default_column(resizable=True, minWidth=160, filterable=True, sortable=True)
+        # A. Définir une largeur minimale par défaut pour TOUTES les colonnes (ex: 50px)
+        gb.configure_default_column(resizable=True, minWidth=50, filterable=True, sortable=True)
 
         # B. Forcer des largeurs spécifiques pour les colonnes importantes
-        gb.configure_column("Variant", minWidth=250)       # Le variant a besoin de place
-        gb.configure_column("Gene_symbol", minWidth=130)   # Le gène un peu moins
-        gb.configure_column("Varsome_HTML", width=90, minWidth=90) # Le lien peut être petit
-        gb.configure_column("patho_score", minWidth=110)
+        gb.configure_column("Variant", minWidth=50)       # Le variant a besoin de place
+        gb.configure_column("Gene_symbol", minWidth=50)   # Le gène un peu moins
+        gb.configure_column("Varsome_HTML", width=50, minWidth=50) # Le lien peut être petit
+        gb.configure_column("patho_score", minWidth=50)
         # -------------------------------------------------
 
         # 4. Styles couleurs
