@@ -3,6 +3,7 @@ import io
 import re
 import glob
 import base64
+import requests # Pour l'API STRING
 from datetime import datetime
 import numpy as np
 import pandas as pd
@@ -14,12 +15,13 @@ from scipy.stats import hypergeom
 # --- NOUVEAUX IMPORTS ---
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 from fpdf import FPDF
+from streamlit_agraph import agraph, Node, Edge, Config # Pour le graphe PPI
 
 # ---------------------------------------
 # 1. CONFIGURATION & OUTILS
 # ---------------------------------------
 
-st.set_page_config(page_title="NGS ATLAS Explorer v9.0", layout="wide", page_icon="🧬")
+st.set_page_config(page_title="NGS ATLAS Explorer v10.0", layout="wide", page_icon="🧬")
 
 # --- Fonctions utilitaires ---
 
@@ -77,6 +79,28 @@ def make_gnomad_link(variant_str):
         return f"https://gnomad.broadinstitute.org/variant/{v}?dataset=gnomad_r2_1"
     except: return ""
 
+# --- Fonction API STRING DB (Nouveau) ---
+@st.cache_data
+def get_string_network(gene_symbol, limit=10):
+    """
+    Récupère les partenaires d'interaction via l'API STRING DB.
+    """
+    url = "https://string-db.org/api/json/network"
+    params = {
+        "identifiers": gene_symbol,
+        "species": 9606,  # Homo sapiens
+        "limit": limit,    # Nombre de partenaires max
+        "network_type": "functional" # ou 'physical'
+    }
+    
+    try:
+        response = requests.get(url, params=params)
+        if response.status_code == 200:
+            return response.json()
+    except Exception as e:
+        return []
+    return []
+
 # --- Fonction de Rapport PDF ---
 
 def create_pdf_report(patient_id, df_variants, user_comments=""):
@@ -108,7 +132,6 @@ def create_pdf_report(patient_id, df_variants, user_comments=""):
 
     # Tableau Variants (Sélectionnés)
     pdf.set_font("Arial", 'B', 10)
-    # Configuration largeurs colonnes
     col_w = [35, 55, 20, 35, 35] 
     headers = ["Gene", "Variant", "Score", "VAF", "ACMG"]
     
@@ -118,7 +141,6 @@ def create_pdf_report(patient_id, df_variants, user_comments=""):
     
     pdf.set_font("Arial", size=9)
     for _, row in df_variants.iterrows():
-        # Troncature pour éviter dépassement
         gene = str(row.get("Gene_symbol", ""))[:15]
         var = str(row.get("Variant", ""))[:25]
         score = str(round(float(row.get("patho_score", 0)), 1))
@@ -366,7 +388,7 @@ def compute_enrichment(df, pathway_genes):
 # 4. INTERFACE
 # ---------------------------------------
 
-st.title("🧬 NGS ATLAS Explorer v9.0")
+st.title("🧬 NGS ATLAS Explorer v10.0")
 st.markdown("---")
 
 if "analysis_done" not in st.session_state:
@@ -482,20 +504,19 @@ if st.session_state["analysis_done"]:
         "📊 Spectre Mutationnel", 
         "📍 Lollipops", 
         "📈 QC", 
-        "🧬 Pathways"
+        "🧬 Pathways",
+        "🕸️ PPI" # Nouvel onglet
     ])
 
     # --- TAB 1: AGGRID & RAPPORT ---
     with tabs[0]:
         st.subheader("📋 Explorateur Interactif")
         
-        # 1. Configurer AgGrid
         gb = GridOptionsBuilder.from_dataframe(df_res)
         gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
-        gb.configure_side_bar() # Filtres latéraux
+        gb.configure_side_bar() 
         gb.configure_selection('multiple', use_checkbox=True, groupSelectsChildren="Group checkbox select children") 
         
-        # 2. Coloration conditionnelle JS (Score Patho)
         cellsytle_jscode = JsCode("""
         function(params) {
             if (params.value >= 10) {
@@ -509,16 +530,13 @@ if st.session_state["analysis_done"]:
         """)
         gb.configure_column("patho_score", cellStyle=cellsytle_jscode)
         
-        # 3. Liens Varsome (HTML render)
         if "link_varsome" in df_res.columns:
             df_res["Varsome_HTML"] = df_res["link_varsome"].apply(lambda x: f'<a href="{x}" target="_blank">🔗</a>' if x else "")
             gb.configure_column("Varsome_HTML", headerName="Lien", cellRenderer="html", width=70)
             gb.configure_column("link_varsome", hide=True)
             gb.configure_column("link_gnomad", hide=True)
 
-        # 4. Colonnes importantes en premier
         cols_order = ["Pseudo", "Gene_symbol", "Variant", "Varsome_HTML", "patho_score", "ACMG_Class", "Allelic_ratio"]
-        # On remet les autres colonnes après
         other_cols = [c for c in df_res.columns if c not in cols_order and c != "Varsome_HTML"]
         gb.configure_grid_options(columnDefs=[{"field": c} for c in cols_order + other_cols])
 
@@ -530,14 +548,13 @@ if st.session_state["analysis_done"]:
             data_return_mode='AS_INPUT', 
             update_mode='MODEL_CHANGED', 
             fit_columns_on_grid_load=False,
-            theme='streamlit', # 'streamlit', 'alpine', 'balham'
+            theme='streamlit', 
             enable_enterprise_modules=False,
             height=600,
             allow_unsafe_jscode=True
         )
         
         selected = grid_response['selected_rows']
-        # Compatibilité versions AgGrid (parfois retourne liste, parfois dataframe)
         if isinstance(selected, pd.DataFrame): df_selected = selected
         else: df_selected = pd.DataFrame(selected)
         
@@ -545,7 +562,6 @@ if st.session_state["analysis_done"]:
 
         st.markdown("---")
         
-        # --- Zone Export Rapport ---
         st.subheader("📄 Générateur de Rapport")
         c_rep1, c_rep2 = st.columns([3, 1])
         with c_rep1:
@@ -553,7 +569,7 @@ if st.session_state["analysis_done"]:
             st.info(f"**{nb_sel} variants sélectionnés** pour le rapport.")
             user_comment = st.text_area("Conclusion / Commentaire clinique :", "Variants compatibles avec le phénotype...")
         with c_rep2:
-            st.write("##") # Spacer
+            st.write("##")
             if st.button("Télécharger Rapport PDF"):
                 pat_id = "Multi-Patients"
                 if "Pseudo" in df_selected.columns:
@@ -711,6 +727,75 @@ if st.session_state["analysis_done"]:
             top = df_enr.sort_values("FDR").head(20)
             st.plotly_chart(px.bar(top, x="minus_log10_FDR", y="pathway", orientation='h', color="k_overlap", title="Top Pathways"), use_container_width=True)
             st.dataframe(df_enr)
+
+    # --- TAB 8: INTERACTIONS (PPI) ---
+    with tabs[7]:
+        st.subheader("🕸️ Réseau d'Interaction Protéique (STRING DB)")
+        
+        
+        # 1. Sélecteur de gène
+        # On récupère tous les gènes uniques du fichier
+        all_genes = sorted(df_res["Gene_symbol"].unique())
+        
+        c_ppi1, c_ppi2 = st.columns([1, 3])
+        with c_ppi1:
+            selected_gene_ppi = st.selectbox("Choisir un gène muté à explorer :", all_genes)
+            nb_partners = st.slider("Nombre de partenaires", 5, 20, 10)
+            min_score = st.slider("Score de confiance min", 0.4, 1.0, 0.7)
+            
+            st.info("""
+            **Légende :**
+            🔴 Gène muté (Patient)
+            🔵 Partenaire (STRING DB)
+            ➖ Épaisseur lien = Confiance
+            """)
+
+        with c_ppi2:
+            if selected_gene_ppi:
+                # Appel API
+                network_data = get_string_network(selected_gene_ppi, limit=nb_partners)
+                
+                if network_data:
+                    nodes = []
+                    edges = []
+                    added_nodes = set()
+
+                    # Ajouter le nœud central (Le gène muté)
+                    nodes.append(Node(id=selected_gene_ppi, label=selected_gene_ppi, size=25, color="#d9534f", shape="dot")) # Rouge
+                    added_nodes.add(selected_gene_ppi)
+
+                    # Parcourir les interactions
+                    for interaction in network_data:
+                        gene_a = interaction.get("preferredName_A").upper()
+                        gene_b = interaction.get("preferredName_B").upper()
+                        score = interaction.get("score", 0)
+
+                        if score < min_score: continue
+
+                        # Ajouter les nœuds s'ils n'existent pas encore
+                        if gene_a not in added_nodes:
+                            col = "#d9534f" if gene_a == selected_gene_ppi else "#5bc0de" # Bleu si partenaire
+                            nodes.append(Node(id=gene_a, label=gene_a, size=15, color=col))
+                            added_nodes.add(gene_a)
+                        
+                        if gene_b not in added_nodes:
+                            col = "#d9534f" if gene_b == selected_gene_ppi else "#5bc0de"
+                            nodes.append(Node(id=gene_b, label=gene_b, size=15, color=col))
+                            added_nodes.add(gene_b)
+
+                        # Ajouter le lien
+                        edges.append(Edge(source=gene_a, target=gene_b, width=score*3, color="#dddddd"))
+
+                    # Configuration du graphe
+                    config = Config(width=700, height=500, directed=False, physics=True, hierarchy=False)
+
+                    # Affichage
+                    if nodes:
+                        return_value = agraph(nodes=nodes, edges=edges, config=config)
+                    else:
+                        st.warning("Aucune interaction trouvée avec ce score minimum.")
+                else:
+                    st.warning(f"Pas de données STRING trouvées pour {selected_gene_ppi} (ou erreur API).")
 
 elif not submitted:
     st.info("👈 Chargez fichier + Lancer.")
