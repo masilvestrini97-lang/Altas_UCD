@@ -510,31 +510,39 @@ if st.session_state["analysis_done"]:
 
     # --- TAB 1: AGGRID & RAPPORT ---
 # --- TAB 1: AGGRID & RAPPORT ---
+   # --- TAB 1: AGGRID & RAPPORT ---
     with tabs[0]:
         st.subheader("📋 Explorateur Interactif")
         
-        # 1. Création de la colonne Lien HTML (AVANT de créer le builder)
+        # 1. Création de la colonne Lien HTML
         if "link_varsome" in df_res.columns:
             df_res["Varsome_HTML"] = df_res["link_varsome"].apply(lambda x: f'<a href="{x}" target="_blank">🔗</a>' if x else "")
         
-        # 2. Réorganisation des colonnes (Tri) via Pandas directement
-        # Liste des colonnes prioritaires
+        # 2. Réorganisation des colonnes (Tri via Pandas)
         desired_order = ["Pseudo", "Gene_symbol", "Variant", "Varsome_HTML", "patho_score", "ACMG_Class", "Allelic_ratio"]
-        # On garde celles qui existent vraiment dans le fichier
         existing_priority = [c for c in desired_order if c in df_res.columns]
-        # On ajoute le reste
         other_cols = [c for c in df_res.columns if c not in existing_priority and c != "link_varsome" and c != "link_gnomad"]
         
-        # On réorganise le DataFrame final
         df_display = df_res[existing_priority + other_cols].copy()
 
-        # 3. Configurer AgGrid avec le DataFrame déjà trié
+        # 3. Configurer AgGrid
         gb = GridOptionsBuilder.from_dataframe(df_display)
         gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
         gb.configure_side_bar() 
         gb.configure_selection('multiple', use_checkbox=True, groupSelectsChildren="Group checkbox select children") 
         
-        # 4. Styles et Formats
+        # --- MODIFICATION POUR LA LARGEUR DES COLONNES ---
+        # A. Définir une largeur minimale par défaut pour TOUTES les colonnes (ex: 160px)
+        gb.configure_default_column(resizable=True, minWidth=160, filterable=True, sortable=True)
+
+        # B. Forcer des largeurs spécifiques pour les colonnes importantes
+        gb.configure_column("Variant", minWidth=250)       # Le variant a besoin de place
+        gb.configure_column("Gene_symbol", minWidth=130)   # Le gène un peu moins
+        gb.configure_column("Varsome_HTML", width=90, minWidth=90) # Le lien peut être petit
+        gb.configure_column("patho_score", minWidth=110)
+        # -------------------------------------------------
+
+        # 4. Styles couleurs
         cellsytle_jscode = JsCode("""
         function(params) {
             if (params.value >= 10) {
@@ -549,13 +557,12 @@ if st.session_state["analysis_done"]:
         gb.configure_column("patho_score", cellStyle=cellsytle_jscode)
         
         if "Varsome_HTML" in df_display.columns:
-            gb.configure_column("Varsome_HTML", headerName="Lien", cellRenderer="html", width=70)
+            gb.configure_column("Varsome_HTML", headerName="Lien", cellRenderer="html")
         
-        # Masquage des colonnes techniques si elles sont restées (par sécurité)
+        # Masquage technique
         if "link_varsome" in df_display.columns: gb.configure_column("link_varsome", hide=True)
         if "link_gnomad" in df_display.columns: gb.configure_column("link_gnomad", hide=True)
 
-        # Construction finale (C'est ici que ça plantait avant)
         gridOptions = gb.build()
         
         grid_response = AgGrid(
@@ -563,7 +570,7 @@ if st.session_state["analysis_done"]:
             gridOptions=gridOptions,
             data_return_mode='AS_INPUT', 
             update_mode='MODEL_CHANGED', 
-            fit_columns_on_grid_load=False,
+            fit_columns_on_grid_load=False, # Important : False permet le scroll horizontal
             theme='streamlit', 
             enable_enterprise_modules=False,
             height=600,
@@ -600,7 +607,6 @@ if st.session_state["analysis_done"]:
                     st.markdown(href, unsafe_allow_html=True)
                 except Exception as e:
                     st.error(f"Erreur PDF : {e}")
-
     # --- TAB 2: Inspecteur ---
     with tabs[1]:
         st.subheader("🔍 Focus Patient")
