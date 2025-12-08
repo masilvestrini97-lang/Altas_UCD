@@ -20,7 +20,7 @@ from streamlit_agraph import agraph, Node, Edge, Config  # Pour le graphe PPI
 # 1. CONFIGURATION & OUTILS
 # ---------------------------------------
 
-st.set_page_config(page_title="NGS ATLAS Explorer v10.1", layout="wide", page_icon="🧬")
+st.set_page_config(page_title="NGS ATLAS Explorer v10.2", layout="wide", page_icon="🧬")
 
 # --- Fonctions utilitaires ---
 
@@ -100,7 +100,7 @@ def get_string_network(gene_symbol, limit=10):
         return []
     return []
 
-# --- Fonction de Rapport PDF (CORRIGÉE) ---
+# --- Fonction de Rapport PDF (CORRIGÉE & MODIFIÉE POUR PROTEINE) ---
 def create_pdf_report(patient_id, df_variants, user_comments=""):
     class PDF(FPDF):
         def header(self):
@@ -125,62 +125,81 @@ def create_pdf_report(patient_id, df_variants, user_comments=""):
         pdf.multi_cell(0, 6, f"Note clinique : {user_comments}")
     pdf.ln(5)
 
-    # --- Configuration des Colonnes (Nom affiché, Nom technique, Largeur) ---
-    # Total A4 Paysage ~ 277mm utilisables
-    columns_config = [
-        ("Gene", "Gene_symbol", 30),
-        ("Variant", "Variant", 55),
-        ("Effect", "Variant_effect", 50),
-        ("VAF", "Allelic_ratio", 20),
-        ("Depth", "Depth", 20),
-        ("gnomAD", "gnomad_exomes_NFE_AF", 30),
-        ("ACMG", "ACMG_Class", 40)
-    ]
+    # --- Configuration des Colonnes ---
+    # Recherche de la colonne protéique
+    prot_candidates = ["hgvs.p", "HGVSp", "Protein_change", "AA_change", "hgvsp", "p."]
+    found_prot = next((c for c in prot_candidates if c in df_variants.columns), None)
+
+    # Configuration dynamique des largeurs pour A4 Paysage (~277mm utilisables)
+    if found_prot:
+        # Si on a la protéine, on réduit un peu les autres colonnes
+        columns_config = [
+            ("Gene", "Gene_symbol", 25),
+            ("Variant", "Variant", 45),
+            ("Protein", found_prot, 35), # Nouvelle colonne
+            ("Effect", "Variant_effect", 45),
+            ("VAF", "Allelic_ratio", 17),
+            ("Dp", "Depth", 15),
+            ("gnomAD", "gnomad_exomes_NFE_AF", 25),
+            ("ACMG", "ACMG_Class", 35) # Reduced
+        ]
+    else:
+        # Configuration standard
+        columns_config = [
+            ("Gene", "Gene_symbol", 30),
+            ("Variant", "Variant", 55),
+            ("Effect", "Variant_effect", 50),
+            ("VAF", "Allelic_ratio", 20),
+            ("Depth", "Depth", 20),
+            ("gnomAD", "gnomad_exomes_NFE_AF", 30),
+            ("ACMG", "ACMG_Class", 40)
+        ]
 
     # --- En-têtes du tableau ---
-    pdf.set_font("Arial", 'B', 9)
-    # Fond gris clair pour l'en-tête
+    pdf.set_font("Arial", 'B', 8) # Police légèrement réduite pour faire rentrer
     pdf.set_fill_color(240, 240, 240)
     
     for label, _, width in columns_config:
-        pdf.cell(width, 8, label, 1, 0, 'C', 1) # Le '1' à la fin active le fill
+        pdf.cell(width, 8, label, 1, 0, 'C', 1)
     pdf.ln()
     
     # --- Données ---
-    pdf.set_font("Arial", '', 8)
+    pdf.set_font("Arial", '', 7) # Police réduite pour les données
     
     for _, row in df_variants.iterrows():
         for label, col_name, width in columns_config:
             # Récupération sécurisée de la valeur
             raw_val = row.get(col_name, "")
             
-            # Formatage spécifique selon la colonne pour faire propre
+            # Formatage spécifique selon la colonne
             display_val = str(raw_val)
             
             if col_name == "Allelic_ratio":
                 try:
-                    # Afficher 0.25 (arrondi)
-                    display_val = str(round(float(raw_val), 3))
+                    display_val = str(round(float(raw_val), 2))
                 except: pass
             
             elif col_name == "gnomad_exomes_NFE_AF":
                 try:
                     val_float = float(raw_val)
                     if val_float == 0: display_val = "0"
-                    else: display_val = f"{val_float:.4f}" # 4 décimales pour gnomAD
+                    elif val_float < 0.0001: display_val = "<1e-4"
+                    else: display_val = f"{val_float:.4f}"
                 except: 
-                    display_val = "" # Vide si pas de donnée
+                    display_val = ""
 
-            # Troncature pour éviter que le texte ne dépasse de la case
-            # Environ 1 char tous les 2mm à cette taille de police
-            max_len = int(width / 2) 
-            if len(display_val) > max_len:
-                display_val = display_val[:max_len-2] + ".."
+            # Nettoyage prefixe p. si doublonné
+            if col_name == found_prot and display_val.startswith("p."):
+                pass # on garde
+
+            # Troncature intelligente
+            max_char = int(width / 1.8) # Approx
+            if len(display_val) > max_char:
+                display_val = display_val[:max_char-2] + ".."
 
             pdf.cell(width, 8, display_val, 1, 0, 'C')
         pdf.ln()
 
-    # Retourne les bytes pour st.download_button
     return pdf.output(dest='S').encode('latin-1', 'ignore')
 
 # ---------------------------------------
@@ -417,7 +436,7 @@ def compute_enrichment(df, pathway_genes):
 # 4. INTERFACE
 # ---------------------------------------
 
-st.title("🧬 NGS ATLAS Explorer v10.1")
+st.title("🧬 NGS ATLAS Explorer v10.2")
 st.markdown("---")
 
 if "analysis_done" not in st.session_state:
@@ -615,7 +634,6 @@ if st.session_state["analysis_done"]:
         
         with c_rep2:
             st.write("##")
-            # Logique propre pour Streamlit Cloud : st.download_button
             pat_id = "Multi-Patients"
             if "Pseudo" in df_selected.columns:
                 unique_pats = df_selected["Pseudo"].unique()
@@ -656,7 +674,7 @@ if st.session_state["analysis_done"]:
                     st.plotly_chart(fig_pat, use_container_width=True)
             else: st.warning("Pas de colonne Pseudo.")
 
-    # --- TAB 3: Corrélation ---
+    # --- TAB 3: Corrélation & HEATMAP MODIFIÉE ---
     with tabs[2]:
         st.subheader("🧩 OncoPrint & Heatmap")
         if "Pseudo" in df_res.columns and "Gene_symbol" in df_res.columns:
@@ -670,8 +688,21 @@ if st.session_state["analysis_done"]:
                     matrix = df_heat.pivot_table(index="Pseudo", columns="Gene_symbol", aggfunc='size', fill_value=0)
                     matrix[matrix > 0] = 1 
                     co_occ = matrix.T.dot(matrix)
-                    fig_corr = px.imshow(co_occ, text_auto=True, color_continuous_scale="Viridis", title="Co-occurrence (Top 30 gènes)")
+                    
+                    # MODIFICATION: Taille augmentée
+                    fig_corr = px.imshow(co_occ, text_auto=True, color_continuous_scale="Viridis", title="Co-occurrence (Top 30 gènes)", height=800)
                     st.plotly_chart(fig_corr, use_container_width=True)
+                    
+                    # MODIFICATION: Export HTML pour "Lien Externe"
+                    buffer = io.StringIO()
+                    fig_corr.write_html(buffer, include_plotlyjs='cdn')
+                    html_bytes = buffer.getvalue().encode()
+                    st.download_button(
+                        label="📥 Télécharger la Heatmap (HTML - Plein Écran)",
+                        data=html_bytes,
+                        file_name="heatmap_correlation.html",
+                        mime="text/html"
+                    )
                     
                 else: # OncoPrint
                     def get_effect_score(eff):
@@ -692,12 +723,25 @@ if st.session_state["analysis_done"]:
                         [0.8, "red"], [1.0, "red"]
                     ]
                     
+                    # MODIFICATION: Taille augmentée
                     fig_onco = go.Figure(data=go.Heatmap(
                         z=matrix_onco.values, x=matrix_onco.columns, y=matrix_onco.index,
                         colorscale=colors, showscale=False, zmin=0, zmax=3
                     ))
-                    fig_onco.update_layout(title="OncoPrint (Rouge=Stop/FS, Orange=Splice, Bleu=Mis)")
+                    fig_onco.update_layout(title="OncoPrint (Rouge=Stop/FS, Orange=Splice, Bleu=Mis)", height=800)
                     st.plotly_chart(fig_onco, use_container_width=True)
+
+                    # MODIFICATION: Export HTML
+                    buffer = io.StringIO()
+                    fig_onco.write_html(buffer, include_plotlyjs='cdn')
+                    html_bytes = buffer.getvalue().encode()
+                    st.download_button(
+                        label="📥 Télécharger l'OncoPrint (HTML - Plein Écran)",
+                        data=html_bytes,
+                        file_name="oncoprint.html",
+                        mime="text/html"
+                    )
+
         else:
             st.warning("Données insuffisantes.")
 
