@@ -509,7 +509,7 @@ if st.session_state["analysis_done"]:
         if "link_varsome" in df_res.columns:
             df_res["Varsome_HTML"] = df_res["link_varsome"].apply(lambda x: f'<a href="{x}" target="_blank">🔗</a>' if x else "")
         
-        cols_base = ["Pseudo", "Gene_symbol", "Variant", "Varsome_HTML", "ACMG_Class", "CADD_phred", "MSC_Ref", "MSC_Status", "Allelic_ratio"]
+        cols_base = ["Pseudo", "Gene_symbol", "Variant", "ACMG_Class", "CADD_phred", "MSC_Ref", "MSC_Status", "Allelic_ratio","Varsome_HTML"]
         existing = [c for c in cols_base if c in df_res.columns]
         others = [c for c in df_res.columns if c not in existing and c not in ["link_varsome", "link_gnomad", "MSC", "ACMG_Rank"]]
         
