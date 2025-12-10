@@ -12,6 +12,7 @@ import plotly.graph_objects as go
 from scipy.stats import hypergeom
 
 # --- IMPORTS TIERS ---
+# Assurez-vous d'avoir installé : pip install st-aggrid fpdf streamlit-agraph
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 from fpdf import FPDF
 from streamlit_agraph import agraph, Node, Edge, Config
@@ -20,9 +21,8 @@ from streamlit_agraph import agraph, Node, Edge, Config
 # 1. CONFIGURATION & OUTILS
 # ---------------------------------------
 
-st.set_page_config(page_title="NGS ATLAS Explorer v12.1 (Wide View)", layout="wide", page_icon="🧬")
+st.set_page_config(page_title="NGS ATLAS Explorer v12.2 (Fix Tabs)", layout="wide", page_icon="🧬")
 
-# Nom du fichier MSC attendu à la racine (GitHub)
 MSC_LOCAL_FILENAME = "MSC_CI99_v1.7.txt"
 
 # --- Fonctions utilitaires ---
@@ -32,18 +32,24 @@ def clean_text(val):
     return re.sub(r'[^A-Za-z0-9]+', '', val.strip().lower())
 
 def extract_ref_alt_chr(df):
-    if "Chromosome" not in df.columns and "Chr" in df.columns:
-        df["Chromosome"] = df["Chr"]
-    if "Chromosome" not in df.columns and "Variant" in df.columns:
-        df["Chromosome"] = df["Variant"].astype(str).str.split(r'[:_-]', n=1, expand=True)[0]
-    if "Chromosome" in df.columns:
-        df["Chromosome"] = df["Chromosome"].astype(str).str.replace("chr", "", case=False).str.strip()
-
-    if ("Ref" not in df.columns or "Alt" not in df.columns) and "Variant" in df.columns:
+    # Sécurisation des conversions string
+    if "Variant" in df.columns:
+        # Regex robuste pour c. et g. (ex: c.123A>T ou chr1:100 A>T)
+        # On cherche pattern: Lettre(s) > Lettre(s) à la fin
         extracted = df["Variant"].astype(str).str.extract(r'([ACGT]+)[>:/]([ACGT]+)$', flags=re.IGNORECASE)
-        if not extracted.isna().all().all():
-            if "Ref" not in df.columns: df["Ref"] = extracted[0].str.upper()
-            if "Alt" not in df.columns: df["Alt"] = extracted[1].str.upper()
+        
+        # Si colonnes manquantes, on remplit
+        if "Ref" not in df.columns and not extracted[0].isna().all():
+            df["Ref"] = extracted[0].str.upper()
+        if "Alt" not in df.columns and not extracted[1].isna().all():
+            df["Alt"] = extracted[1].str.upper()
+            
+        # Extraction Chromosome
+        if "Chromosome" not in df.columns:
+            # Prend tout ce qui est avant le premier séparateur :, _ ou -
+            df["Chromosome"] = df["Variant"].astype(str).str.split(r'[:_-]', n=1, expand=True)[0]
+            df["Chromosome"] = df["Chromosome"].str.replace("chr", "", case=False).str.strip()
+
     return df
 
 @st.cache_data
@@ -57,7 +63,7 @@ def load_variants(uploaded_file, sep_guess="auto"):
     try:
         df = pd.read_csv(uploaded_file, sep=sep, dtype=str, on_bad_lines='skip')
         df = df.replace('"', '', regex=True)
-        df = extract_ref_alt_chr(df)
+        df = extract_ref_alt_chr(df) # Extraction initiale
         return df
     except Exception as e:
         st.error(f"Erreur lecture : {e}")
@@ -69,23 +75,17 @@ def make_varsome_link(variant_str):
         return f"https://varsome.com/variant/hg19/{v}"
     except: return ""
 
-def make_gnomad_link(variant_str):
-    try:
-        v = str(variant_str).replace(":", "-").replace(">", "-")
-        return f"https://gnomad.broadinstitute.org/variant/{v}?dataset=gnomad_r2_1"
-    except: return ""
-
 @st.cache_data
 def get_string_network(gene_symbol, limit=10):
     url = "https://string-db.org/api/json/network"
     params = {"identifiers": gene_symbol, "species": 9606, "limit": limit, "network_type": "functional"}
     try:
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, timeout=5)
         if response.status_code == 200: return response.json()
     except: return []
     return []
 
-# --- Fonction de Rapport PDF ---
+# --- Fonction PDF ---
 def create_pdf_report(patient_id, df_variants, user_comments=""):
     class PDF(FPDF):
         def header(self):
@@ -110,7 +110,6 @@ def create_pdf_report(patient_id, df_variants, user_comments=""):
     prot_candidates = ["hgvs.p", "HGVSp", "Protein_change", "AA_change", "hgvsp", "p."]
     found_prot = next((c for c in prot_candidates if c in df_variants.columns), None)
 
-    # Configuration des colonnes
     columns_config = [
         ("Gene", "Gene_symbol", 25),
         ("Variant", "Variant", 45),
@@ -175,8 +174,10 @@ def apply_filtering_and_scoring(
         return None, 0, 0, "Colonne 'Gene_symbol' manquante.", []
 
     df["Gene_symbol"] = df["Gene_symbol"].str.upper().str.replace(" ", "")
+    # Sécurité pour Ref/Alt/Chr si perdus
+    df = extract_ref_alt_chr(df)
 
-    # Normalisation basique
+    # Normalisation
     for col in ["Variant_effect", "Putative_impact", "Clinvar_significance"]:
         if col in df.columns: df[col] = df[col].fillna("Non Renseigné")
 
@@ -188,7 +189,7 @@ def apply_filtering_and_scoring(
     else:
         df["internal_freq"] = 0.0
 
-    # Conversions numériques
+    # Conversions
     cols_num = ["gnomad_exomes_NFE_AF", "CADD_phred", "Allelic_ratio", "Depth", "Alt_depth_total"]
     for c in cols_num:
         if c in df.columns: df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -197,7 +198,7 @@ def apply_filtering_and_scoring(
         df["Alt_depth_total"] = df["Alt_depth"].astype(str).str.split(',').str[0].str.split(' ').str[0]
         df["Alt_depth_total"] = pd.to_numeric(df["Alt_depth_total"], errors='coerce').fillna(0)
 
-    # --- FILTRES DE BASE ---
+    # --- FILTRES ---
     last_count = len(df)
     if "Depth" in df.columns: df = df[df["Depth"] >= min_depth]
     if "Alt_depth_total" in df.columns: df = df[df["Alt_depth_total"] >= min_alt_depth]
@@ -216,7 +217,6 @@ def apply_filtering_and_scoring(
     if putative_keep and "Putative_impact" in df.columns: df = df[df["Putative_impact"].isin(putative_keep)]
     if clinvar_keep and "Clinvar_significance" in df.columns: df = df[df["Clinvar_significance"].isin(clinvar_keep)]
     
-    # Filtre CADD global (optionnel)
     if min_cadd is not None and min_cadd > 0 and "CADD_phred" in df.columns:
         df = df[(df["CADD_phred"].isna()) | (df["CADD_phred"] >= min_cadd)]
     logs.append({"Etape": "4. Catégories & CADD", "Restants": len(df), "Perdus": last_count - len(df)}); last_count = len(df)
@@ -226,12 +226,11 @@ def apply_filtering_and_scoring(
         df["link_varsome"] = df["Variant"].apply(make_varsome_link)
     else: df["link_varsome"] = ""
 
-    # --- MSC LOGIC (CADD vs Gene Threshold) ---
+    # --- MSC LOGIC ---
     df["MSC_Ref"] = np.nan
-    df["MSC_Status"] = "N/A" # "High Impact" or "Background"
+    df["MSC_Status"] = "N/A"
 
     msc_df = None
-    # Chargement
     if os.path.exists(MSC_LOCAL_FILENAME):
         try: msc_df = pd.read_csv(MSC_LOCAL_FILENAME, sep="\t", dtype=str)
         except: pass
@@ -251,43 +250,37 @@ def apply_filtering_and_scoring(
                 msc_clean = msc_clean.groupby("Gene")["MSC"].max().reset_index()
                 
                 df = df.merge(msc_clean, left_on="Gene_symbol", right_on="Gene", how="left")
-                df["MSC_Ref"] = df["MSC"] # Renommage
+                df["MSC_Ref"] = df["MSC"]
                 
                 if "CADD_phred" in df.columns:
                     cond_has_values = (df["CADD_phred"].notna()) & (df["MSC_Ref"].notna())
                     cond_low = cond_has_values & (df["CADD_phred"] < df["MSC_Ref"])
                     
-                    df.loc[cond_low, "MSC_Status"] = "Background" # CADD < MSC
-                    df.loc[~cond_low & cond_has_values, "MSC_Status"] = "High Impact" # CADD >= MSC
+                    df.loc[cond_low, "MSC_Status"] = "Background"
+                    df.loc[~cond_low & cond_has_values, "MSC_Status"] = "High Impact"
 
                     if use_msc_filter_strict:
                         df = df[~cond_low]
-                        logs.append({"Etape": "5. Filtre MSC Strict (CADD < MSC)", "Restants": len(df), "Perdus": last_count - len(df)})
+                        logs.append({"Etape": "5. Filtre MSC Strict", "Restants": len(df), "Perdus": last_count - len(df)})
                         last_count = len(df)
         except Exception as e:
             logs.append({"Etape": "Erreur MSC", "Info": str(e)})
 
-    # --- ACMG CLASSIFICATION (Prioritaire) ---
+    # --- ACMG ---
     if use_acmg:
         def compute_acmg_class(row):
-            # Critères très simplifiés pour démo
             eff = str(row.get("Variant_effect", "")).lower()
             pvs1 = any(x in eff for x in ["stopgained", "frameshift", "splice_acceptor", "splice_donor"])
-            
             af = row.get("gnomad_exomes_NFE_AF", np.nan)
             pm2 = pd.isna(af) or (af < 0.0001)
-            
             cadd = row.get("CADD_phred", 0)
-            pp3 = cadd >= 25 # Support computationnel fort
-            
+            pp3 = cadd >= 25
             clv = str(row.get("Clinvar_significance", "")).lower()
             pp5 = "pathogenic" in clv and "conflict" not in clv
             benign_clinvar = "benign" in clv and "pathogenic" not in clv
-            
             ba1 = (af > 0.05) if not pd.isna(af) else False
             
             if ba1 or benign_clinvar: return "Benign", 0
-            
             score = 0
             if pvs1: score += 4
             if pm2: score += 2
@@ -301,12 +294,12 @@ def apply_filtering_and_scoring(
 
         acmg_res = df.apply(compute_acmg_class, axis=1, result_type='expand')
         df["ACMG_Class"] = acmg_res[0]
-        df["ACMG_Rank"] = acmg_res[1] # Pour le tri
+        df["ACMG_Rank"] = acmg_res[1]
     else:
         df["ACMG_Class"] = "Non calculé"
         df["ACMG_Rank"] = 0
 
-    # --- TRI FINAL (Basé sur ACMG ou CADD) ---
+    # --- TRI FINAL ---
     if sort_by_column == "Classification ACMG (Priorité)": 
         df = df.sort_values("ACMG_Rank", ascending=False)
     elif sort_by_column == "Score CADD (Décroissant)": 
@@ -371,7 +364,7 @@ def compute_enrichment(df, pathway_genes):
 # 4. INTERFACE
 # ---------------------------------------
 
-st.title("🧬 NGS ATLAS Explorer v12.1")
+st.title("🧬 NGS ATLAS Explorer v12.2")
 st.markdown("### Analyse de variants avec classification ACMG & Filtrage MSC")
 st.markdown("---")
 
@@ -489,8 +482,8 @@ if st.session_state["analysis_done"]:
     tabs = st.tabs([
         "📋 Tableau & Rapport", 
         "🔍 Inspecteur ACMG", 
-        "🧩 Corrélation", 
-        "📊 Spectre", 
+        "🧩 Corrélation & OncoPrint", 
+        "📊 Spectre Mutationnel", 
         "📍 Lollipops (CADD)", 
         "📈 QC", 
         "🧬 Pathways",
@@ -504,7 +497,6 @@ if st.session_state["analysis_done"]:
         if "link_varsome" in df_res.columns:
             df_res["Varsome_HTML"] = df_res["link_varsome"].apply(lambda x: f'<a href="{x}" target="_blank">🔗</a>' if x else "")
         
-        # COLONNES CLAIRES MSC / ACMG
         cols_base = ["Pseudo", "Gene_symbol", "Variant", "Varsome_HTML", "ACMG_Class", "CADD_phred", "MSC_Ref", "MSC_Status", "Allelic_ratio"]
         existing = [c for c in cols_base if c in df_res.columns]
         others = [c for c in df_res.columns if c not in existing and c not in ["link_varsome", "link_gnomad", "MSC", "ACMG_Rank"]]
@@ -513,22 +505,11 @@ if st.session_state["analysis_done"]:
 
         gb = GridOptionsBuilder.from_dataframe(df_display)
         
-        # --- CONFIGURATION AFFICHAGE LARGE ---
         gb.configure_pagination(paginationPageSize=20)
         gb.configure_selection('multiple', use_checkbox=True)
-        
-        # On définit une largeur minimale par défaut pour TOUTES les colonnes
-        gb.configure_default_column(
-            resizable=True,
-            filterable=True,
-            sortable=True,
-            minWidth=150, # Force les colonnes à être assez larges
-        )
-        
-        # Spécifique pour Variant (souvent long)
+        gb.configure_default_column(resizable=True, filterable=True, sortable=True, minWidth=150)
         gb.configure_column("Variant", minWidth=200)
 
-        # COULEURS ACMG
         acmg_style = JsCode("""
         function(params) {
             if (params.value == 'Pathogenic') return {'color': 'white', 'backgroundColor': '#d9534f'};
@@ -539,7 +520,6 @@ if st.session_state["analysis_done"]:
         """)
         gb.configure_column("ACMG_Class", cellStyle=acmg_style)
 
-        # COULEURS MSC
         msc_style = JsCode("""
         function(params) {
             if (params.value == 'High Impact') return {'color': '#a94442', 'backgroundColor': '#f2dede', 'fontWeight': 'bold'};
@@ -552,14 +532,7 @@ if st.session_state["analysis_done"]:
         if "Varsome_HTML" in df_display.columns: gb.configure_column("Varsome_HTML", headerName="Lien", cellRenderer="html")
         if "link_varsome" in df_display.columns: gb.configure_column("link_varsome", hide=True)
 
-        # IMPORTANT: fit_columns_on_grid_load=False pour permettre le scroll horizontal
-        grid_response = AgGrid(
-            df_display, 
-            gridOptions=gb.build(), 
-            allow_unsafe_jscode=True, 
-            height=600,
-            fit_columns_on_grid_load=False # La clé pour voir tout le texte
-        )
+        grid_response = AgGrid(df_display, gridOptions=gb.build(), allow_unsafe_jscode=True, height=600, fit_columns_on_grid_load=False)
         
         df_selected = pd.DataFrame(grid_response['selected_rows'])
         if df_selected.empty: df_selected = df_res
@@ -577,38 +550,87 @@ if st.session_state["analysis_done"]:
                 st.download_button("📥 PDF Report", pdf_bytes, f"Rapport_{pat_id}.pdf", "application/pdf", type="primary")
             except Exception as e: st.error(f"Erreur PDF: {e}")
 
-    # --- TAB 2: INSPECTEUR (CORRÉLÉ ACMG) ---
+    # --- TAB 2: INSPECTEUR (ACMG) ---
     with tabs[1]:
         st.subheader("🔍 Inspecteur Clinique (ACMG)")
         if "Pseudo" in df_res.columns:
             sel_pat = st.selectbox("Patient", sorted(df_res["Pseudo"].unique()))
             if sel_pat:
                 df_pat = df_res[df_res["Pseudo"] == sel_pat].copy()
-                # Tri par gravité ACMG
                 df_pat = df_pat.sort_values(["ACMG_Rank", "CADD_phred"], ascending=False).head(20)
                 
-                # Bar chart coloré par ACMG
                 fig_pat = px.bar(
                     df_pat, x="CADD_phred", y="Gene_symbol", orientation='h',
                     color="ACMG_Class", 
-                    title=f"Top Variants {sel_pat} (Coloré par ACMG)",
+                    title=f"Top Variants {sel_pat}",
                     hover_data=["Variant", "MSC_Status"],
-                    color_discrete_map={
-                        "Pathogenic": "#d9534f", 
-                        "Likely Pathogenic": "#f0ad4e",
-                        "VUS": "#5bc0de",
-                        "Likely Benign": "#5cb85c",
-                        "Benign": "green"
-                    }
+                    color_discrete_map={"Pathogenic": "#d9534f", "Likely Pathogenic": "#f0ad4e", "VUS": "#5bc0de", "Likely Benign": "#5cb85c", "Benign": "green"}
                 )
                 fig_pat.update_layout(yaxis={'categoryorder':'total ascending'})
                 st.plotly_chart(fig_pat, use_container_width=True)
-                
-                st.info("L'axe X représente le score CADD (Dangerosité biologique). La couleur représente la classification ACMG (Dangerosité clinique).")
 
-    # --- TAB 5: LOLLIPOPS (CADD) ---
+    # --- TAB 3: CORRELATION & ONCOPRINT (FIXED) ---
+    with tabs[2]:
+        st.subheader("🧩 OncoPrint & Heatmap")
+        if "Pseudo" in df_res.columns and "Gene_symbol" in df_res.columns and not df_res.empty:
+            view_mode = st.radio("Mode", ["Heatmap (Corrélation)", "OncoPrint (Types de mutations)"], horizontal=True)
+            
+            top_genes = df_res["Gene_symbol"].value_counts().head(30).index.tolist()
+            df_heat = df_res[df_res["Gene_symbol"].isin(top_genes)].copy()
+            
+            if not df_heat.empty:
+                if view_mode == "Heatmap (Corrélation)":
+                    matrix = df_heat.pivot_table(index="Pseudo", columns="Gene_symbol", aggfunc='size', fill_value=0)
+                    matrix[matrix > 0] = 1 
+                    co_occ = matrix.T.dot(matrix)
+                    fig_corr = px.imshow(co_occ, text_auto=True, color_continuous_scale="Viridis", height=800)
+                    st.plotly_chart(fig_corr, use_container_width=True)
+                else: # OncoPrint
+                    def get_effect_score(eff):
+                        e = str(eff).lower().replace("_", "")
+                        if any(x in e for x in ["stop", "frameshift", "nonsense"]): return 3
+                        if "splice" in e: return 2
+                        if "missense" in e: return 1
+                        return 0.5
+                    
+                    df_heat["Effet_Code"] = df_heat["Variant_effect"].apply(get_effect_score)
+                    matrix_onco = df_heat.pivot_table(index="Gene_symbol", columns="Pseudo", values="Effet_Code", aggfunc='max', fill_value=0)
+                    
+                    colors = [[0.0, "white"], [0.05, "white"], [0.05, "lightgrey"], [0.25, "lightgrey"], [0.25, "blue"], [0.5, "blue"], [0.5, "orange"], [0.8, "orange"], [0.8, "red"], [1.0, "red"]]
+                    
+                    fig_onco = go.Figure(data=go.Heatmap(z=matrix_onco.values, x=matrix_onco.columns, y=matrix_onco.index, colorscale=colors, showscale=False, zmin=0, zmax=3))
+                    fig_onco.update_layout(title="OncoPrint", height=800)
+                    st.plotly_chart(fig_onco, use_container_width=True)
+        else:
+            st.warning("Données insuffisantes pour les corrélations.")
+
+    # --- TAB 4: SPECTRE (FIXED) ---
+    with tabs[3]:
+        st.subheader("📊 Spectre Mutationnel")
+        # Fix: Assurer l'existence de Ref/Alt
+        df_mut = extract_ref_alt_chr(df_res.copy())
+        
+        if "Ref" in df_mut.columns and "Alt" in df_mut.columns and "Pseudo" in df_mut.columns:
+            df_mut["mutation"] = df_mut["Ref"] + ">" + df_mut["Alt"]
+            trans_map = {'G>T': 'C>A', 'G>C': 'C>G', 'G>A': 'C>T', 'A>T': 'T>A', 'A>G': 'T>C', 'A>C': 'T>G'}
+            df_mut["canon_mut"] = df_mut["mutation"].apply(lambda x: trans_map.get(x, x))
+            valid_snvs = ['C>A', 'C>G', 'C>T', 'T>A', 'T>C', 'T>G']
+            df_mut = df_mut[df_mut["canon_mut"].isin(valid_snvs)]
+            
+            if not df_mut.empty:
+                counts = df_mut.groupby(["Pseudo", "canon_mut"]).size().reset_index(name="Count")
+                colors = {'C>A': '#1ebff0', 'C>G': '#050708', 'C>T': '#e62725', 'T>A': '#cbcacb', 'T>C': '#a1cf64', 'T>G': '#edc8c5'}
+                fig_spec = px.bar(
+                    counts, x="Pseudo", y="Count", color="canon_mut",
+                    color_discrete_map=colors, title="Distribution des substitutions"
+                )
+                st.plotly_chart(fig_spec, use_container_width=True)
+            else: st.info("Aucun SNV standard trouvé.")
+        else: st.warning("Impossible d'extraire Ref/Alt.")
+
+    # --- TAB 5: LOLLIPOPS ---
     with tabs[4]:
-        st.subheader("📍 Lollipop Plot (Axe Y = CADD)")
+        st.subheader("📍 Lollipop Plot")
         prot_cols = ["hgvs.p", "HGVSp", "Protein_change", "AA_change", "hgvsp"]
         found_col = next((c for c in prot_cols if c in df_res.columns), None)
         
@@ -622,26 +644,74 @@ if st.session_state["analysis_done"]:
                 df_lol = df_lol.dropna(subset=["AA_pos", "CADD_phred"])
                 
                 if not df_lol.empty:
-                    max_pos = df_lol["AA_pos"].max()
                     fig_lol = px.scatter(
                         df_lol, x="AA_pos", y="CADD_phred", color="ACMG_Class",
                         size="CADD_phred", hover_data=["Pseudo", found_col],
-                        range_x=[0, max_pos*1.1], title=f"Mutations sur {sel_gene_lol}"
+                        title=f"Mutations sur {sel_gene_lol}"
                     )
-                    # Ligne du MSC si disponible
+                    # Ligne MSC
                     if "MSC_Ref" in df_lol.columns and not df_lol["MSC_Ref"].isna().all():
-                        msc_val = df_lol["MSC_Ref"].iloc[0]
-                        fig_lol.add_hline(y=msc_val, line_dash="dash", line_color="red", annotation_text=f"MSC Cutoff ({msc_val})")
-                        
+                        fig_lol.add_hline(y=df_lol["MSC_Ref"].iloc[0], line_dash="dash", line_color="red")
+                    
                     for _, row in df_lol.iterrows():
                         fig_lol.add_shape(type="line", x0=row["AA_pos"], y0=0, x1=row["AA_pos"], y1=row["CADD_phred"], line=dict(color="grey", width=1))
                     st.plotly_chart(fig_lol, use_container_width=True)
-                else: st.warning("Pas de positions/CADD trouvés.")
-        else: st.warning("Colonne protéique introuvable.")
 
-    # --- (Les autres tabs restent fonctionnels mais standard) ---
-    with tabs[2]: st.info("OncoPrint disponible")
+    # --- TAB 6: QC ---
     with tabs[5]: st.plotly_chart(px.scatter(df_res, x="Depth", y="Allelic_ratio", color="ACMG_Class", log_x=True))
+
+    # --- TAB 7: PATHWAYS (FIXED) ---
+    with tabs[6]:
+        if df_enr.empty or "minus_log10_FDR" not in df_enr.columns:
+            st.info("Aucun enrichissement détecté ou fichiers .gmt manquants.")
+        else:
+            top = df_enr.sort_values("FDR").head(20)
+            st.plotly_chart(px.bar(top, x="minus_log10_FDR", y="pathway", orientation='h', color="k_overlap", title="Top Pathways"), use_container_width=True)
+            st.dataframe(df_enr)
+
+    # --- TAB 8: PPI (FIXED) ---
+    with tabs[7]:
+        st.subheader("🕸️ Réseau STRING DB")
+        all_genes = sorted(df_res["Gene_symbol"].unique())
+        if not all_genes: st.warning("Aucun gène disponible.")
+        else:
+            c_ppi1, c_ppi2 = st.columns([1, 3])
+            with c_ppi1:
+                selected_gene_ppi = st.selectbox("Gène muté :", all_genes)
+                nb_partners = st.slider("Partenaires", 5, 20, 10)
+                min_score = st.slider("Confiance min", 0.4, 1.0, 0.7)
+            
+            with c_ppi2:
+                if selected_gene_ppi:
+                    network_data = get_string_network(selected_gene_ppi, limit=nb_partners)
+                    if network_data:
+                        nodes, edges, added = [], [], set()
+                        # Central Node
+                        nodes.append(Node(id=selected_gene_ppi, label=selected_gene_ppi, size=25, color="#d9534f", shape="dot"))
+                        added.add(selected_gene_ppi)
+                        
+                        for interaction in network_data:
+                            try:
+                                ga = interaction.get("preferredName_A", "").upper()
+                                gb = interaction.get("preferredName_B", "").upper()
+                                s = interaction.get("score", 0)
+                                if s < min_score: continue
+                                
+                                if ga and ga not in added:
+                                    col = "#d9534f" if ga == selected_gene_ppi else "#5bc0de"
+                                    nodes.append(Node(id=ga, label=ga, size=15, color=col))
+                                    added.add(ga)
+                                if gb and gb not in added:
+                                    col = "#d9534f" if gb == selected_gene_ppi else "#5bc0de"
+                                    nodes.append(Node(id=gb, label=gb, size=15, color=col))
+                                    added.add(gb)
+                                edges.append(Edge(source=ga, target=gb, width=s*2))
+                            except: pass
+
+                        if nodes:
+                            agraph(nodes=nodes, edges=edges, config=Config(width=700, height=500, directed=False, physics=True))
+                        else: st.info("Pas d'interactions trouvées.")
+                    else: st.warning("API String DB silencieuse ou pas de résultats.")
 
 elif not submitted:
     st.info("👈 Chargez fichier + Lancer.")
