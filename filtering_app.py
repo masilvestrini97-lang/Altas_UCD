@@ -25,7 +25,6 @@ st.set_page_config(page_title="NGS ATLAS Explorer", layout="wide", page_icon="�
 MSC_LOCAL_FILENAME = "MSC_CI99_v1.7.txt"
 
 # --- DESIGN PERSONNALISÉ (CSS) ---
-# Tu peux remplacer cette URL par le lien "Raw" de ton image GitHub
 HEADER_IMG_URL = "https://raw.githubusercontent.com/masilvestrini97-lang/Altas_UCD/refs/heads/main/images.jpeg"
 
 def render_custom_header():
@@ -34,7 +33,8 @@ def render_custom_header():
     .header-container {{
         background-image: linear-gradient(rgba(0, 0, 0, 0.6), rgba(0, 0, 0, 0.6)), url('{HEADER_IMG_URL}');
         background-size: cover;
-        background-position: center;
+        /* MODIFICATION CADRAGE : center 30% (X Y) descend le point de focus verticalement */
+        background-position: center 30%;
         padding: 50px 20px;
         border-radius: 15px;
         text-align: center;
@@ -42,7 +42,8 @@ def render_custom_header():
         box-shadow: 0 4px 10px rgba(0,0,0,0.2);
     }}
     .header-title {{
-        color: # 8C005F; /* CHANGE LA COULEUR ICI (Changer la couleur ici) */
+        /* CORRECTION COULEUR : Suppression de l'espace après le # */
+        color: #8C005F; 
         font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
         font-size: 48px;
         font-weight: 800;
