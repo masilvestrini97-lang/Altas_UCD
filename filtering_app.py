@@ -20,7 +20,7 @@ from streamlit_agraph import agraph, Node, Edge, Config
 # 1. CONFIGURATION & OUTILS
 # ---------------------------------------
 
-st.set_page_config(page_title="NGS ATLAS Explorer v12 (Clean ACMG/MSC)", layout="wide", page_icon="🧬")
+st.set_page_config(page_title="NGS ATLAS Explorer v12.1 (Wide View)", layout="wide", page_icon="🧬")
 
 # Nom du fichier MSC attendu à la racine (GitHub)
 MSC_LOCAL_FILENAME = "MSC_CI99_v1.7.txt"
@@ -85,7 +85,7 @@ def get_string_network(gene_symbol, limit=10):
     except: return []
     return []
 
-# --- Fonction de Rapport PDF (Nettoyée) ---
+# --- Fonction de Rapport PDF ---
 def create_pdf_report(patient_id, df_variants, user_comments=""):
     class PDF(FPDF):
         def header(self):
@@ -110,7 +110,7 @@ def create_pdf_report(patient_id, df_variants, user_comments=""):
     prot_candidates = ["hgvs.p", "HGVSp", "Protein_change", "AA_change", "hgvsp", "p."]
     found_prot = next((c for c in prot_candidates if c in df_variants.columns), None)
 
-    # Configuration des colonnes (Plus de Patho Score, Focus ACMG/MSC)
+    # Configuration des colonnes
     columns_config = [
         ("Gene", "Gene_symbol", 25),
         ("Variant", "Variant", 45),
@@ -371,7 +371,7 @@ def compute_enrichment(df, pathway_genes):
 # 4. INTERFACE
 # ---------------------------------------
 
-st.title("🧬 NGS ATLAS Explorer v12")
+st.title("🧬 NGS ATLAS Explorer v12.1")
 st.markdown("### Analyse de variants avec classification ACMG & Filtrage MSC")
 st.markdown("---")
 
@@ -512,10 +512,22 @@ if st.session_state["analysis_done"]:
         df_display = df_res[existing + others].copy()
 
         gb = GridOptionsBuilder.from_dataframe(df_display)
+        
+        # --- CONFIGURATION AFFICHAGE LARGE ---
         gb.configure_pagination(paginationPageSize=20)
         gb.configure_selection('multiple', use_checkbox=True)
-        gb.configure_column("Variant", minWidth=120)
         
+        # On définit une largeur minimale par défaut pour TOUTES les colonnes
+        gb.configure_default_column(
+            resizable=True,
+            filterable=True,
+            sortable=True,
+            minWidth=150, # Force les colonnes à être assez larges
+        )
+        
+        # Spécifique pour Variant (souvent long)
+        gb.configure_column("Variant", minWidth=200)
+
         # COULEURS ACMG
         acmg_style = JsCode("""
         function(params) {
@@ -540,7 +552,14 @@ if st.session_state["analysis_done"]:
         if "Varsome_HTML" in df_display.columns: gb.configure_column("Varsome_HTML", headerName="Lien", cellRenderer="html")
         if "link_varsome" in df_display.columns: gb.configure_column("link_varsome", hide=True)
 
-        grid_response = AgGrid(df_display, gridOptions=gb.build(), allow_unsafe_jscode=True, height=600)
+        # IMPORTANT: fit_columns_on_grid_load=False pour permettre le scroll horizontal
+        grid_response = AgGrid(
+            df_display, 
+            gridOptions=gb.build(), 
+            allow_unsafe_jscode=True, 
+            height=600,
+            fit_columns_on_grid_load=False # La clé pour voir tout le texte
+        )
         
         df_selected = pd.DataFrame(grid_response['selected_rows'])
         if df_selected.empty: df_selected = df_res
@@ -621,7 +640,7 @@ if st.session_state["analysis_done"]:
         else: st.warning("Colonne protéique introuvable.")
 
     # --- (Les autres tabs restent fonctionnels mais standard) ---
-    with tabs[2]: st.info("OncoPrint disponible (Voir Tab correspondant dans versions précédentes)")
+    with tabs[2]: st.info("OncoPrint disponible")
     with tabs[5]: st.plotly_chart(px.scatter(df_res, x="Depth", y="Allelic_ratio", color="ACMG_Class", log_x=True))
 
 elif not submitted:
