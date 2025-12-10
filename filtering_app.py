@@ -20,7 +20,10 @@ from streamlit_agraph import agraph, Node, Edge, Config  # Pour le graphe PPI
 # 1. CONFIGURATION & OUTILS
 # ---------------------------------------
 
-st.set_page_config(page_title="NGS ATLAS Explorer v10.2", layout="wide", page_icon="🧬")
+st.set_page_config(page_title="NGS ATLAS Explorer v11.0 (MSC Edition)", layout="wide", page_icon="🧬")
+
+# Nom du fichier MSC attendu à la racine du projet (GitHub)
+MSC_LOCAL_FILENAME = "MSC_CI99_v1.7.txt"
 
 # --- Fonctions utilitaires ---
 
@@ -100,7 +103,7 @@ def get_string_network(gene_symbol, limit=10):
         return []
     return []
 
-# --- Fonction de Rapport PDF (CORRIGÉE & MODIFIÉE POUR PROTEINE) ---
+# --- Fonction de Rapport PDF ---
 def create_pdf_report(patient_id, df_variants, user_comments=""):
     class PDF(FPDF):
         def header(self):
@@ -209,10 +212,11 @@ def create_pdf_report(patient_id, df_variants, user_comments=""):
 @st.cache_data
 def apply_filtering_and_scoring(
     df, allelic_ratio_min, gnomad_max, use_gnomad_filter, min_patho_score, use_patho_filter,
-    min_depth, min_alt_depth, max_cohort_freq, use_msc, constraint_file_content,
+    min_depth, min_alt_depth, max_cohort_freq, 
+    msc_file_uploaded_content, # Contenu du fichier si uploadé
     genes_exclude, patients_exclude, min_cadd,
     variant_effect_keep, putative_keep, clinvar_keep, sort_by_column,
-    use_acmg
+    use_acmg, use_msc_filter_strict
 ):
     logs = [] 
     df = df.copy()
@@ -275,11 +279,10 @@ def apply_filtering_and_scoring(
     if clinvar_keep and "Clinvar_significance" in df.columns: df = df[df["Clinvar_significance"].isin(clinvar_keep)]
     logs.append({"Etape": "8. Catégories", "Restants": len(df), "Perdus": last_count - len(df)}); last_count = len(df)
 
-    # --- MODIFICATION DEMANDÉE : FILTRE CADD ---
+    # --- FILTRE CADD ---
     if min_cadd is not None and min_cadd > 0 and "CADD_phred" in df.columns:
-        # On garde les lignes où CADD est vide (NaN) OU CADD >= seuil
         df = df[(df["CADD_phred"].isna()) | (df["CADD_phred"] >= min_cadd)]
-    logs.append({"Etape": "9. CADD", "Restants": len(df), "Perdus": last_count - len(df)}); last_count = len(df)
+    logs.append({"Etape": "9. CADD Min", "Restants": len(df), "Perdus": last_count - len(df)}); last_count = len(df)
 
     # --- LIENS ---
     if "Variant" in df.columns:
@@ -289,23 +292,72 @@ def apply_filtering_and_scoring(
         df["link_varsome"] = ""
         df["link_gnomad"] = ""
 
-    # --- SCORING ---
-    df["msc_weight"] = 0.0
-    if use_msc and constraint_file_content:
-        try:
-            c_df = pd.read_csv(io.StringIO(constraint_file_content), sep="\t", dtype=str)
-            if "gene" in c_df.columns:
-                c_df["gene"] = c_df["gene"].str.upper().str.replace(" ", "")
-                if "mis_z" in c_df.columns: c_df["mis_z"] = pd.to_numeric(c_df["mis_z"], errors="coerce")
-                elif "mis.z_score" in c_df.columns: c_df["mis_z"] = pd.to_numeric(c_df["mis.z_score"], errors="coerce")
-                
-                if "mis_z" in c_df.columns:
-                    c_df = c_df.groupby("gene", as_index=False)["mis_z"].max()
-                    df = df.merge(c_df[["gene", "mis_z"]], left_on="Gene_symbol", right_on="gene", how="left")
-                    df["mis_z"] = df["mis_z"].fillna(0)
-                    df["msc_weight"] = df["mis_z"] * 0.5
-        except: pass
+    # --- INTEGRATION MSC (Mutation Significance Cutoff) ---
+    df["MSC_Ref"] = np.nan
+    df["MSC_Status"] = "N/A" # Par défaut
 
+    msc_df = None
+    
+    # 1. Essai chargement local (GitHub)
+    if os.path.exists(MSC_LOCAL_FILENAME):
+        try:
+            # Séparateur \t attendu pour ce fichier spécifique
+            msc_df = pd.read_csv(MSC_LOCAL_FILENAME, sep="\t", dtype=str)
+        except Exception as e:
+            pass # On tentera l'upload
+
+    # 2. Essai chargement via Upload (prioritaire si fourni)
+    if msc_file_uploaded_content is not None:
+        try:
+            msc_df = pd.read_csv(io.StringIO(msc_file_uploaded_content), sep="\t", dtype=str)
+        except:
+            # Fallback csv classique
+             try:
+                msc_df = pd.read_csv(io.StringIO(msc_file_uploaded_content), sep=",", dtype=str)
+             except: pass
+    
+    # Si on a des données MSC
+    if msc_df is not None:
+        try:
+            # Nettoyage colonnes (Gene, MSC)
+            msc_df.columns = [c.strip() for c in msc_df.columns]
+            
+            # Identification des colonnes
+            # Le fichier fourni a: Gene, MSC (et d'autres)
+            if "Gene" in msc_df.columns and "MSC" in msc_df.columns:
+                msc_clean = msc_df[["Gene", "MSC"]].copy()
+                msc_clean["Gene"] = msc_clean["Gene"].str.upper().str.strip()
+                msc_clean["MSC"] = pd.to_numeric(msc_clean["MSC"], errors='coerce')
+                
+                # Merge
+                # On regroupe par gène au cas où doublons (prend le max par sécurité)
+                msc_clean = msc_clean.groupby("Gene")["MSC"].max().reset_index()
+                
+                df = df.merge(msc_clean, left_on="Gene_symbol", right_on="Gene", how="left")
+                df["MSC_Ref"] = df["MSC"] # Renommage interne
+                
+                # Logique comparaison CADD vs MSC
+                if "CADD_phred" in df.columns:
+                    # Calcul du statut
+                    # Pass = CADD >= MSC ou pas de MSC ou pas de CADD
+                    # Low = CADD < MSC
+                    
+                    cond_has_values = (df["CADD_phred"].notna()) & (df["MSC_Ref"].notna())
+                    cond_low = cond_has_values & (df["CADD_phred"] < df["MSC_Ref"])
+                    
+                    df.loc[cond_low, "MSC_Status"] = "Low"
+                    df.loc[~cond_low, "MSC_Status"] = "Pass"
+
+                    # FILTRE STRICT
+                    if use_msc_filter_strict:
+                        df = df[~cond_low]
+                        logs.append({"Etape": "9b. Filtre MSC (CADD < MSC)", "Restants": len(df), "Perdus": last_count - len(df)})
+                        last_count = len(df)
+            
+        except Exception as e:
+            logs.append({"Etape": "Erreur MSC", "Info": str(e)})
+
+    # --- SCORING ---
     df["score_putative"] = 0
     if "Putative_impact" in df.columns:
         def get_imp(x):
@@ -328,7 +380,8 @@ def apply_filtering_and_scoring(
             [5, 2], default=0
         )
 
-    df["patho_score"] = df["score_putative"] + df["score_cadd"] + df["score_clinvar"] + df["msc_weight"]
+    # Note: On n'utilise plus msc_weight ici car on a le vrai filtrage MSC
+    df["patho_score"] = df["score_putative"] + df["score_cadd"] + df["score_clinvar"]
 
     # --- ACMG (Simplifié) ---
     if use_acmg:
@@ -438,7 +491,7 @@ def compute_enrichment(df, pathway_genes):
 # 4. INTERFACE
 # ---------------------------------------
 
-st.title("🧬 NGS ATLAS Explorer v10.2")
+st.title("🧬 NGS ATLAS Explorer v11.0")
 st.markdown("---")
 
 if "analysis_done" not in st.session_state:
@@ -480,7 +533,7 @@ with st.sidebar:
             min_cadd_val = st.number_input("CADD Min (0=all)", 0.0, 60.0, 0.0)
             use_acmg = st.checkbox("Activer classification ACMG (Auto)", value=False)
 
-        with st.expander("Avancé"):
+        with st.expander("Avancé & Filtres MSC"):
             sel_var = st.multiselect("Effet", v_opts, default=v_opts)
             sel_put = st.multiselect("Impact", p_opts, default=p_opts)
             sel_clin = st.multiselect("ClinVar", c_opts, default=c_opts)
@@ -488,8 +541,20 @@ with st.sidebar:
             pseudo_ex = st.text_area("Exclure Patients", "")
             use_gnomad = st.checkbox("Filtre gnomAD", True)
             use_patho = st.checkbox("Filtre Patho", True)
-            use_msc = st.checkbox("MSC", False)
-            msc_file = st.file_uploader("Fichier MSC", type=["tsv"])
+            
+            st.markdown("---")
+            st.markdown("**🛡️ MSC Filter (Gene-specific)**")
+            
+            # Détection automatique du fichier local
+            has_local_msc = os.path.exists(MSC_LOCAL_FILENAME)
+            if has_local_msc:
+                st.success(f"Fichier MSC détecté : {MSC_LOCAL_FILENAME}")
+                msc_file_upload = None
+            else:
+                st.warning(f"Fichier '{MSC_LOCAL_FILENAME}' non trouvé. Veuillez l'uploader.")
+                msc_file_upload = st.file_uploader("Fichier MSC", type=["txt", "tsv", "csv"])
+
+            use_msc_filter_strict = st.checkbox("EXCLURE variants si CADD < MSC", value=False, help="Supprime les variants considérés comme 'bruit de fond' physiologique pour le gène concerné.")
 
         st.header("3. Pathways")
         st.info("Les fichiers .gmt du dossier local seront chargés automatiquement.")
@@ -499,12 +564,19 @@ with st.sidebar:
 if submitted and df_raw is not None:
     g_list = [x.strip().upper() for x in genes_ex.split(",") if x.strip()]
     p_list = [x.strip() for x in pseudo_ex.split(",") if x.strip()]
-    msc_c = msc_file.read().decode("utf-8") if (use_msc and msc_file) else None
+    
+    # Lecture contenu fichier uploadé si besoin
+    msc_content = None
+    if msc_file_upload is not None:
+        msc_content = msc_file_upload.read().decode("utf-8")
 
     res, ini, fin, err, logs = apply_filtering_and_scoring(
         df_raw, allelic_min, gnomad_max, use_gnomad, min_patho, use_patho, 
-        min_dp, min_ad, max_cohort_freq, use_msc, msc_c, g_list, p_list, 
-        min_cadd_val, sel_var, sel_put, sel_clin, sort_choice, use_acmg
+        min_dp, min_ad, max_cohort_freq, 
+        msc_content, # Contenu uploadé ou None (si local)
+        g_list, p_list, 
+        min_cadd_val, sel_var, sel_put, sel_clin, sort_choice, use_acmg,
+        use_msc_filter_strict
     )
 
     if err:
@@ -566,10 +638,14 @@ if st.session_state["analysis_done"]:
         if "link_varsome" in df_res.columns:
             df_res["Varsome_HTML"] = df_res["link_varsome"].apply(lambda x: f'<a href="{x}" target="_blank">🔗</a>' if x else "")
         
-        # 2. Réorganisation des colonnes
-        desired_order = ["Pseudo", "Gene_symbol", "Variant", "Varsome_HTML", "patho_score", "ACMG_Class", "Allelic_ratio"]
+        # 2. Réorganisation des colonnes (Ajout MSC)
+        desired_order = [
+            "Pseudo", "Gene_symbol", "Variant", "Varsome_HTML", 
+            "patho_score", "MSC_Ref", "MSC_Status", 
+            "ACMG_Class", "Allelic_ratio"
+        ]
         existing_priority = [c for c in desired_order if c in df_res.columns]
-        other_cols = [c for c in df_res.columns if c not in existing_priority and c != "link_varsome" and c != "link_gnomad"]
+        other_cols = [c for c in df_res.columns if c not in existing_priority and c != "link_varsome" and c != "link_gnomad" and c != "MSC"]
         
         df_display = df_res[existing_priority + other_cols].copy()
 
@@ -584,7 +660,21 @@ if st.session_state["analysis_done"]:
         gb.configure_column("Gene_symbol", minWidth=100)
         gb.configure_column("patho_score", minWidth=100)
 
-        # 4. Styles couleurs
+        # Config visuelle MSC
+        if "MSC_Status" in df_display.columns:
+            msc_style = JsCode("""
+            function(params) {
+                if (params.value == 'Low') {
+                    return {'color': '#a94442', 'backgroundColor': '#f2dede', 'fontWeight': 'bold'};
+                } else if (params.value == 'Pass') {
+                    return {'color': '#3c763d', 'backgroundColor': '#dff0d8'};
+                }
+                return null;
+            };
+            """)
+            gb.configure_column("MSC_Status", cellStyle=msc_style)
+
+        # Styles couleurs Patho Score
         cellsytle_jscode = JsCode("""
         function(params) {
             if (params.value >= 10) {
@@ -626,7 +716,7 @@ if st.session_state["analysis_done"]:
 
         st.markdown("---")
         
-        # --- Zone Export Rapport (MODIFIÉE) ---
+        # --- Zone Export Rapport ---
         st.subheader("📄 Générateur de Rapport")
         c_rep1, c_rep2 = st.columns([3, 1])
         with c_rep1:
@@ -676,7 +766,7 @@ if st.session_state["analysis_done"]:
                     st.plotly_chart(fig_pat, use_container_width=True)
             else: st.warning("Pas de colonne Pseudo.")
 
-    # --- TAB 3: Corrélation & HEATMAP MODIFIÉE ---
+    # --- TAB 3: Corrélation & Heatmap ---
     with tabs[2]:
         st.subheader("🧩 OncoPrint & Heatmap")
         if "Pseudo" in df_res.columns and "Gene_symbol" in df_res.columns:
@@ -691,20 +781,13 @@ if st.session_state["analysis_done"]:
                     matrix[matrix > 0] = 1 
                     co_occ = matrix.T.dot(matrix)
                     
-                    # MODIFICATION: Taille augmentée
                     fig_corr = px.imshow(co_occ, text_auto=True, color_continuous_scale="Viridis", title="Co-occurrence (Top 30 gènes)", height=800)
                     st.plotly_chart(fig_corr, use_container_width=True)
                     
-                    # MODIFICATION: Export HTML pour "Lien Externe"
                     buffer = io.StringIO()
                     fig_corr.write_html(buffer, include_plotlyjs='cdn')
                     html_bytes = buffer.getvalue().encode()
-                    st.download_button(
-                        label="📥 Télécharger la Heatmap (HTML - Plein Écran)",
-                        data=html_bytes,
-                        file_name="heatmap_correlation.html",
-                        mime="text/html"
-                    )
+                    st.download_button("📥 Télécharger HTML", html_bytes, "heatmap.html", "text/html")
                     
                 else: # OncoPrint
                     def get_effect_score(eff):
@@ -725,7 +808,6 @@ if st.session_state["analysis_done"]:
                         [0.8, "red"], [1.0, "red"]
                     ]
                     
-                    # MODIFICATION: Taille augmentée
                     fig_onco = go.Figure(data=go.Heatmap(
                         z=matrix_onco.values, x=matrix_onco.columns, y=matrix_onco.index,
                         colorscale=colors, showscale=False, zmin=0, zmax=3
@@ -733,16 +815,10 @@ if st.session_state["analysis_done"]:
                     fig_onco.update_layout(title="OncoPrint (Rouge=Stop/FS, Orange=Splice, Bleu=Mis)", height=800)
                     st.plotly_chart(fig_onco, use_container_width=True)
 
-                    # MODIFICATION: Export HTML
                     buffer = io.StringIO()
                     fig_onco.write_html(buffer, include_plotlyjs='cdn')
                     html_bytes = buffer.getvalue().encode()
-                    st.download_button(
-                        label="📥 Télécharger l'OncoPrint (HTML - Plein Écran)",
-                        data=html_bytes,
-                        file_name="oncoprint.html",
-                        mime="text/html"
-                    )
+                    st.download_button("📥 Télécharger HTML", html_bytes, "oncoprint.html", "text/html")
 
         else:
             st.warning("Données insuffisantes.")
