@@ -7,3 +7,4 @@ requests
 streamlit-aggrid
 streamlit-agraph
 fpdf
+sklearn
