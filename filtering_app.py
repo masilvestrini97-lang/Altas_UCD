@@ -15,6 +15,7 @@ from scipy.stats import hypergeom
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 from fpdf import FPDF
 from streamlit_agraph import agraph, Node, Edge, Config
+from sklearn.cluster import KMeans  # <--- AJOUT POUR L'ANALYSE CLONALE
 
 # ---------------------------------------
 # 1. CONFIGURATION & DESIGN
@@ -195,7 +196,7 @@ def apply_filtering_and_scoring(
     genes_exclude, patients_exclude, min_cadd,
     variant_effect_keep, putative_keep, clinvar_keep, sort_by_column,
     use_acmg, use_msc_filter_strict,
-    acmg_keep_list # <--- NOUVEL ARGUMENT
+    acmg_keep_list 
 ):
     logs = [] 
     df = df.copy()
@@ -515,7 +516,8 @@ if st.session_state["analysis_done"]:
     k2.metric("Final", n_fin)
     k3.metric("Ratio", f"{round(n_fin/n_ini*100, 2) if n_ini>0 else 0}%")
 
-    tabs = st.tabs(["📋 Tableau", "🔍 Inspecteur", "🧩 Corrélation", "📊 Spectre", "📍 Lollipops", "📈 QC", "🧬 Pathways", "🕸️ PPI"])
+    # AJOUT DE L'ONGLET "Evolution Clonale" ICI
+    tabs = st.tabs(["📋 Tableau", "🔍 Inspecteur", "🧩 Corrélation", "📊 Spectre", "📍 Lollipops", "📈 QC", "🧬 Pathways", "🕸️ PPI", "🧬 Évolution Clonale"])
 
     # --- TAB 1: AGGRID ---
     with tabs[0]:
@@ -702,6 +704,73 @@ if st.session_state["analysis_done"]:
                             except: pass
                         agraph(nodes=nodes, edges=edges, config=Config(width=700, height=500, directed=False, physics=True))
                     else: st.warning("Pas d'interactions.")
+    
+    # --- TAB 9: EVOLUTION CLONALE (NOUVEAU) ---
+    with tabs[8]:
+        st.subheader("🧬 Analyse de l'Architecture Clonale")
+        
+        # Vérification des colonnes nécessaires
+        if "Pseudo" in df_res.columns and "Allelic_ratio" in df_res.columns:
+            # Sélecteur de Patient
+            patients_list = sorted(df_res["Pseudo"].astype(str).unique())
+            sel_pat_clon = st.selectbox("Sélectionner un Patient pour l'analyse clonale :", patients_list)
+            
+            if sel_pat_clon:
+                # Filtrer les données pour ce patient
+                df_clon = df_res[df_res["Pseudo"] == sel_pat_clon].copy()
+                df_clon = df_clon.dropna(subset=["Allelic_ratio"])
+                
+                # Interface de paramètres
+                col_c1, col_c2 = st.columns([1, 3])
+                with col_c1:
+                    n_clusters = st.slider("Nombre de clones estimés (Clusters)", 1, 5, 2, help="En général : 2 (Clonal/Subclonal) ou 3 (LOH/Clonal/Subclonal)")
+                    st.info(f"Variants analysables : {len(df_clon)}")
+                
+                with col_c2:
+                    if len(df_clon) < 3:
+                        st.warning("Pas assez de variants (<3) pour effectuer un clustering fiable.")
+                    else:
+                        try:
+                            # 1. Algorithme K-Means sur la VAF
+                            X = df_clon[["Allelic_ratio"]].values
+                            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+                            df_clon["Cluster_ID"] = kmeans.fit_predict(X)
+                            
+                            # 2. Ordonner les clusters par VAF moyenne pour les nommer
+                            centroids = df_clon.groupby("Cluster_ID")["Allelic_ratio"].mean().sort_values().index
+                            cluster_map = {old_id: f"C{i+1}" for i, old_id in enumerate(centroids)}
+                            df_clon["Cluster_Label"] = df_clon["Cluster_ID"].map(cluster_map)
+                            
+                            # 3. Visualisation (Histogramme + KDE)
+                            fig_clon = px.histogram(
+                                df_clon, 
+                                x="Allelic_ratio", 
+                                color="Cluster_Label", 
+                                nbins=30, 
+                                marginal="rug",
+                                title=f"Architecture Clonale - {sel_pat_clon}",
+                                labels={"Allelic_ratio": "Fréquence Allélique (VAF)", "Cluster_Label": "Clone détecté"},
+                                opacity=0.7,
+                                barmode="overlay",
+                                color_discrete_sequence=px.colors.qualitative.G10
+                            )
+                            # Ajouter des lignes verticales pour les centres (moyennes)
+                            cluster_means = df_clon.groupby("Cluster_Label")["Allelic_ratio"].mean()
+                            for cl_label, mean_val in cluster_means.items():
+                                fig_clon.add_vline(x=mean_val, line_dash="dot", annotation_text=f"{cl_label} ({mean_val:.2f})")
+                                
+                            fig_clon.update_layout(xaxis_range=[0, 1.05])
+                            st.plotly_chart(fig_clon, use_container_width=True)
+                            
+                            # 4. Tableau des variants par clone
+                            st.markdown("#### Détail des variants par clone")
+                            df_display_clon = df_clon[["Gene_symbol", "Variant", "Allelic_ratio", "Cluster_Label", "ACMG_Class", "CADD_phred"]].sort_values(["Cluster_Label", "Allelic_ratio"], ascending=False)
+                            st.dataframe(df_display_clon, use_container_width=True)
+                            
+                        except Exception as e:
+                            st.error(f"Erreur lors du calcul : {e}")
+        else:
+            st.warning("Les colonnes 'Pseudo' et/ou 'Allelic_ratio' sont introuvables dans le fichier source.")
 
 elif not submitted:
     st.info("👈 Chargez fichier + Lancer.")
