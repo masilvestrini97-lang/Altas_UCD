@@ -33,7 +33,6 @@ def render_custom_header():
     .header-container {{
         background-image: linear-gradient(rgba(0, 0, 0, 0.6), rgba(0, 0, 0, 0.6)), url('{HEADER_IMG_URL}');
         background-size: cover;
-        /* MODIFICATION CADRAGE : center 30% (X Y) descend le point de focus verticalement */
         background-position: center 30%;
         padding: 50px 20px;
         border-radius: 15px;
@@ -42,7 +41,6 @@ def render_custom_header():
         box-shadow: 0 4px 10px rgba(0,0,0,0.2);
     }}
     .header-title {{
-        /* CORRECTION COULEUR : Suppression de l'espace après le # */
         color: #8C005F; 
         font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
         font-size: 48px;
@@ -196,7 +194,8 @@ def apply_filtering_and_scoring(
     msc_file_uploaded_content,
     genes_exclude, patients_exclude, min_cadd,
     variant_effect_keep, putative_keep, clinvar_keep, sort_by_column,
-    use_acmg, use_msc_filter_strict
+    use_acmg, use_msc_filter_strict,
+    acmg_keep_list # <--- NOUVEL ARGUMENT
 ):
     logs = [] 
     df = df.copy()
@@ -323,6 +322,12 @@ def apply_filtering_and_scoring(
         df["ACMG_Class"] = "Non calculé"
         df["ACMG_Rank"] = 0
 
+    # --- FILTRE ACMG GLOBAL AJOUTÉ ICI ---
+    if acmg_keep_list:
+        last_count = len(df)
+        df = df[df["ACMG_Class"].isin(acmg_keep_list)]
+        logs.append({"Etape": "6. Filtre ACMG Global", "Restants": len(df), "Perdus": last_count - len(df)})
+
     # --- TRI ---
     if sort_by_column == "Classification ACMG (Priorité)": 
         df = df.sort_values("ACMG_Rank", ascending=False)
@@ -427,6 +432,15 @@ with st.sidebar:
         with c4:
             use_acmg = st.checkbox("Calculer ACMG", value=True)
             use_gnomad = st.checkbox("Filtre gnomAD", True)
+            
+            # --- AJOUT DU FILTRE ACMG GLOBAL ICI ---
+            acmg_options = ["Pathogenic", "Likely Pathogenic", "VUS", "Likely Benign", "Benign", "Non calculé"]
+            acmg_to_keep = st.multiselect(
+                "Filtre Global ACMG", 
+                options=acmg_options, 
+                default=acmg_options
+            )
+            # ---------------------------------------
 
         with st.expander("Avancé & Filtres MSC"):
             sel_var = st.multiselect("Effet", v_opts, default=v_opts)
@@ -465,7 +479,8 @@ if submitted and df_raw is not None:
         msc_content,
         g_list, p_list, 
         min_cadd_val, sel_var, sel_put, sel_clin, sort_choice, use_acmg,
-        use_msc_filter_strict
+        use_msc_filter_strict,
+        acmg_to_keep # <--- PASSAGE DE LA LISTE ICI
     )
 
     if err: st.error(err)
@@ -503,30 +518,18 @@ if st.session_state["analysis_done"]:
     tabs = st.tabs(["📋 Tableau", "🔍 Inspecteur", "🧩 Corrélation", "📊 Spectre", "📍 Lollipops", "📈 QC", "🧬 Pathways", "🕸️ PPI"])
 
     # --- TAB 1: AGGRID ---
-# --- TAB 1: AGGRID ---
     with tabs[0]:
         st.subheader("📋 Liste des variants filtrés")
         
-        # --- NOYAU DE FILTRAGE ACMG AJOUTÉ ICI ---
-        df_to_show = df_res.copy() # On travaille sur une copie pour ne pas casser les autres onglets
+        df_to_show = df_res.copy() 
         
+        # NOTE : Le filtre global (Sidebar) a DÉJÀ été appliqué.
+        # Ici, on remet le filtre local pour affiner visuellement si besoin.
         if "ACMG_Class" in df_to_show.columns:
-            # Récupérer toutes les classes présentes (ex: Pathogenic, VUS, etc.)
             all_acmg_classes = sorted(df_to_show["ACMG_Class"].astype(str).unique())
-            
-            # Widget de sélection (par défaut, tout est sélectionné)
-            selected_acmg = st.multiselect(
-                "🎯 Filtrer par Classification ACMG :", 
-                options=all_acmg_classes, 
-                default=all_acmg_classes
-            )
-            
-            # Application du filtre
+            selected_acmg = st.multiselect("Filtrer l'affichage :", options=all_acmg_classes, default=all_acmg_classes)
             df_to_show = df_to_show[df_to_show["ACMG_Class"].isin(selected_acmg)]
-            
-            # Petit compteur pour voir combien il en reste
-            st.caption(f"Affichage de {len(df_to_show)} variants sur {len(df_res)}.")
-        # -----------------------------------------
+            st.caption(f"Affichage de {len(df_to_show)} variants sur {len(df_res)} (Total filtré).")
 
         if "link_varsome" in df_to_show.columns:
             df_to_show["Varsome_HTML"] = df_to_show["link_varsome"].apply(lambda x: f'<a href="{x}" target="_blank">🔗</a>' if x else "")
@@ -535,7 +538,6 @@ if st.session_state["analysis_done"]:
         existing = [c for c in cols_base if c in df_to_show.columns]
         others = [c for c in df_to_show.columns if c not in existing and c not in ["link_varsome", "link_gnomad", "MSC", "ACMG_Rank"]]
         
-        # Création du dataframe final pour l'affichage
         df_display = df_to_show[existing + others].copy()
 
         gb = GridOptionsBuilder.from_dataframe(df_display)
@@ -569,8 +571,6 @@ if st.session_state["analysis_done"]:
         grid_response = AgGrid(df_display, gridOptions=gb.build(), allow_unsafe_jscode=True, height=600, fit_columns_on_grid_load=False)
         
         df_selected = pd.DataFrame(grid_response['selected_rows'])
-        
-        # MODIFICATION ICI : Si rien n'est coché, on prend le tableau FILTRÉ (df_display) et non le total (df_res)
         if df_selected.empty: df_selected = df_display
 
         st.markdown("---")
