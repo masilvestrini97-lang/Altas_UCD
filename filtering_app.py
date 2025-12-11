@@ -503,17 +503,40 @@ if st.session_state["analysis_done"]:
     tabs = st.tabs(["📋 Tableau", "🔍 Inspecteur", "🧩 Corrélation", "📊 Spectre", "📍 Lollipops", "📈 QC", "🧬 Pathways", "🕸️ PPI"])
 
     # --- TAB 1: AGGRID ---
+# --- TAB 1: AGGRID ---
     with tabs[0]:
         st.subheader("📋 Liste des variants filtrés")
         
-        if "link_varsome" in df_res.columns:
-            df_res["Varsome_HTML"] = df_res["link_varsome"].apply(lambda x: f'<a href="{x}" target="_blank">🔗</a>' if x else "")
+        # --- NOYAU DE FILTRAGE ACMG AJOUTÉ ICI ---
+        df_to_show = df_res.copy() # On travaille sur une copie pour ne pas casser les autres onglets
+        
+        if "ACMG_Class" in df_to_show.columns:
+            # Récupérer toutes les classes présentes (ex: Pathogenic, VUS, etc.)
+            all_acmg_classes = sorted(df_to_show["ACMG_Class"].astype(str).unique())
+            
+            # Widget de sélection (par défaut, tout est sélectionné)
+            selected_acmg = st.multiselect(
+                "🎯 Filtrer par Classification ACMG :", 
+                options=all_acmg_classes, 
+                default=all_acmg_classes
+            )
+            
+            # Application du filtre
+            df_to_show = df_to_show[df_to_show["ACMG_Class"].isin(selected_acmg)]
+            
+            # Petit compteur pour voir combien il en reste
+            st.caption(f"Affichage de {len(df_to_show)} variants sur {len(df_res)}.")
+        # -----------------------------------------
+
+        if "link_varsome" in df_to_show.columns:
+            df_to_show["Varsome_HTML"] = df_to_show["link_varsome"].apply(lambda x: f'<a href="{x}" target="_blank">🔗</a>' if x else "")
         
         cols_base = ["Pseudo", "Gene_symbol", "Variant", "ACMG_Class", "CADD_phred", "MSC_Ref", "MSC_Status", "Allelic_ratio","Varsome_HTML"]
-        existing = [c for c in cols_base if c in df_res.columns]
-        others = [c for c in df_res.columns if c not in existing and c not in ["link_varsome", "link_gnomad", "MSC", "ACMG_Rank"]]
+        existing = [c for c in cols_base if c in df_to_show.columns]
+        others = [c for c in df_to_show.columns if c not in existing and c not in ["link_varsome", "link_gnomad", "MSC", "ACMG_Rank"]]
         
-        df_display = df_res[existing + others].copy()
+        # Création du dataframe final pour l'affichage
+        df_display = df_to_show[existing + others].copy()
 
         gb = GridOptionsBuilder.from_dataframe(df_display)
         gb.configure_pagination(paginationPageSize=20)
@@ -546,7 +569,9 @@ if st.session_state["analysis_done"]:
         grid_response = AgGrid(df_display, gridOptions=gb.build(), allow_unsafe_jscode=True, height=600, fit_columns_on_grid_load=False)
         
         df_selected = pd.DataFrame(grid_response['selected_rows'])
-        if df_selected.empty: df_selected = df_res
+        
+        # MODIFICATION ICI : Si rien n'est coché, on prend le tableau FILTRÉ (df_display) et non le total (df_res)
+        if df_selected.empty: df_selected = df_display
 
         st.markdown("---")
         c_rep1, c_rep2 = st.columns([3, 1])
