@@ -8,3 +8,4 @@ streamlit-aggrid
 streamlit-agraph
 fpdf
 scikit-learn
+zipfile
