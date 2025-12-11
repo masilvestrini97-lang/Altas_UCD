@@ -707,130 +707,165 @@ if st.session_state["analysis_done"]:
                     else: st.warning("Pas d'interactions.")
     
     # --- TAB 9: EVOLUTION CLONALE (AVEC EXPORT DE MASSE) ---
+    # --- TAB 9: EVOLUTION CLONALE (AVEC RAPPORT PDF GLOBAL) ---
     with tabs[8]:
         st.subheader("🧬 Analyse de l'Architecture Clonale")
         
         # Vérification des colonnes nécessaires
         if "Pseudo" in df_res.columns and "Allelic_ratio" in df_res.columns:
             
-            # --- SECTION 1 : ANALYSE INDIVIDUELLE (VISUALISATION) ---
+            # --- SECTION 1 : VISUALISATION INTERACTIVE (Reste inchangée) ---
             c_sel1, c_sel2 = st.columns([1, 3])
             with c_sel1:
                 patients_list = sorted(df_res["Pseudo"].astype(str).unique())
                 sel_pat_clon = st.selectbox("Sélectionner un Patient :", patients_list)
             
-            # Paramètres globaux pour l'onglet
-            n_clusters_def = 3 # Valeur par défaut pour l'export de masse
+            n_clusters_def = 3 
             
             if sel_pat_clon:
                 df_clon = df_res[df_res["Pseudo"] == sel_pat_clon].copy()
                 df_clon = df_clon.dropna(subset=["Allelic_ratio"])
                 
-                # Interface de paramètres locaux
                 col_c1, col_c2 = st.columns([1, 3])
                 with col_c1:
-                    n_clusters = st.slider("Nombre de clones (Clusters)", 1, 5, n_clusters_def, key="slider_clon_indiv")
+                    n_clusters = st.slider("Nombre de clones", 1, 5, n_clusters_def, key="slider_clon_indiv")
                     st.info(f"Variants : {len(df_clon)}")
                 
                 with col_c2:
                     if len(df_clon) < 3:
-                        st.warning("Pas assez de variants (<3) pour ce patient.")
+                        st.warning("Pas assez de variants (<3).")
                     else:
                         try:
-                            # Algorithme K-Means
+                            # K-Means
                             X = df_clon[["Allelic_ratio"]].values
                             kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
                             df_clon["Cluster_ID"] = kmeans.fit_predict(X)
                             
-                            # Nommage des clusters
                             centroids = df_clon.groupby("Cluster_ID")["Allelic_ratio"].mean().sort_values().index
                             cluster_map = {old_id: f"C{i+1}" for i, old_id in enumerate(centroids)}
                             df_clon["Cluster_Label"] = df_clon["Cluster_ID"].map(cluster_map)
                             
-                            # Graphique
+                            # Plotly (Interactif)
                             fig_clon = px.histogram(
                                 df_clon, x="Allelic_ratio", color="Cluster_Label", 
                                 nbins=30, marginal="rug", opacity=0.7, barmode="overlay",
-                                title=f"Architecture Clonale - {sel_pat_clon}",
-                                labels={"Allelic_ratio": "VAF", "Cluster_Label": "Clone"},
+                                title=f"Architecture - {sel_pat_clon}",
                                 color_discrete_sequence=px.colors.qualitative.G10
                             )
-                            cluster_means = df_clon.groupby("Cluster_Label")["Allelic_ratio"].mean()
-                            for cl_label, mean_val in cluster_means.items():
-                                fig_clon.add_vline(x=mean_val, line_dash="dot", annotation_text=f"{cl_label}")
                             fig_clon.update_layout(xaxis_range=[0, 1.05])
-                            
                             st.plotly_chart(fig_clon, use_container_width=True)
                             
-                            # Tableau
-                            st.dataframe(
-                                df_clon[["Gene_symbol", "Variant", "Allelic_ratio", "Cluster_Label", "ACMG_Class"]]
-                                .sort_values(["Cluster_Label", "Allelic_ratio"], ascending=False),
-                                use_container_width=True
-                            )
+                        except Exception as e: st.error(f"Erreur : {e}")
 
-                        except Exception as e:
-                            st.error(f"Erreur calcul : {e}")
-
-            # --- SECTION 2 : EXPORT DE MASSE ---
+            # --- SECTION 2 : EXPORT PDF GLOBAL ---
             st.markdown("---")
-            st.subheader("📦 Export Global (Tous les patients)")
-            st.info("Génère une archive ZIP contenant les graphiques interactifs (HTML) de tous les patients filtrés.")
+            st.subheader("📄 Rapport PDF Global")
+            st.info("Génère un PDF unique avec une page par patient (Graphique + Tableau).")
             
-            # Bouton pour lancer la génération
-            if st.button("Générer l'archive ZIP"):
+            if st.button("Générer le PDF Global"):
+                import matplotlib.pyplot as plt
+                import seaborn as sns
+                from fpdf import FPDF
+                import tempfile
+
+                class PDFReport(FPDF):
+                    def header(self):
+                        self.set_font('Arial', 'B', 10)
+                        self.cell(0, 10, 'Atlas Clonal Analysis Report', 0, 1, 'R')
+                    def footer(self):
+                        self.set_y(-15)
+                        self.set_font('Arial', 'I', 8)
+                        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+
+                pdf = PDFReport()
                 progress_bar = st.progress(0)
-                zip_buffer = io.BytesIO()
                 
-                with zipfile.ZipFile(zip_buffer, "w") as zf:
+                # Création d'un dossier temporaire pour les images
+                with tempfile.TemporaryDirectory() as tmp_dir:
                     total_pats = len(patients_list)
                     
                     for idx, pat in enumerate(patients_list):
-                        # Mise à jour barre de progression
                         progress_bar.progress((idx + 1) / total_pats)
                         
-                        # Filtrage silencieux
+                        # Filtrage et Calcul
                         d_temp = df_res[df_res["Pseudo"] == pat].copy().dropna(subset=["Allelic_ratio"])
                         
                         if len(d_temp) >= 3:
                             try:
-                                # Calcul K-Means (Standard : 3 clusters)
-                                X_t = d_temp[["Allelic_ratio"]].values
-                                km_t = KMeans(n_clusters=n_clusters_def, random_state=42, n_init=10)
-                                d_temp["Cluster_ID"] = km_t.fit_predict(X_t)
-                                
-                                # Labels
+                                # 1. Calculs Clusters
+                                km = KMeans(n_clusters=3, random_state=42, n_init=10) # Force 3 clusters pour standardisation
+                                d_temp["Cluster_ID"] = km.fit_predict(d_temp[["Allelic_ratio"]].values)
                                 cents = d_temp.groupby("Cluster_ID")["Allelic_ratio"].mean().sort_values().index
                                 cmap = {oid: f"C{i+1}" for i, oid in enumerate(cents)}
                                 d_temp["Cluster_Label"] = d_temp["Cluster_ID"].map(cmap)
                                 
-                                # Figure Plotly
-                                fig_t = px.histogram(
-                                    d_temp, x="Allelic_ratio", color="Cluster_Label", 
-                                    nbins=30, marginal="rug", opacity=0.7, barmode="overlay",
-                                    title=f"Clonal Architecture - {pat}",
-                                    color_discrete_sequence=px.colors.qualitative.G10
-                                )
-                                fig_t.update_layout(xaxis_range=[0, 1.05])
+                                # 2. Génération Graphique Matplotlib (Statique pour PDF)
+                                plt.figure(figsize=(10, 5))
+                                sns.histplot(data=d_temp, x="Allelic_ratio", hue="Cluster_Label", 
+                                             bins=30, kde=True, palette="viridis", element="step")
+                                plt.title(f"Patient: {pat} - Architecture Clonale")
+                                plt.xlim(0, 1.05)
+                                plt.xlabel("VAF")
+                                plt.ylabel("Count")
                                 
-                                # Conversion en HTML
-                                html_str = fig_t.to_html(include_plotlyjs="cdn", full_html=True)
-                                zf.writestr(f"Clonal_Graph_{pat}.html", html_str)
+                                # Sauvegarde image
+                                img_path = os.path.join(tmp_dir, f"{clean_text(pat)}.png")
+                                plt.savefig(img_path, dpi=100, bbox_inches='tight')
+                                plt.close()
+
+                                # 3. Ajout Page PDF
+                                pdf.add_page()
+                                pdf.set_font("Arial", 'B', 16)
+                                pdf.cell(0, 10, f"Patient : {pat}", 0, 1, 'L')
                                 
-                            except: pass # On ignore silencieusement les erreurs pour ne pas bloquer l'export
+                                # Image
+                                pdf.image(img_path, x=10, y=30, w=190)
+                                
+                                # Tableau
+                                pdf.set_y(130)
+                                pdf.set_font("Arial", 'B', 10)
+                                pdf.cell(0, 10, "Tableau des Variants (Top 15 par VAF)", 0, 1)
+                                
+                                # En-têtes tableau
+                                cols = [("Gene", 25), ("Variant", 50), ("VAF", 20), ("Clone", 20), ("ACMG", 40)]
+                                pdf.set_fill_color(220, 220, 220)
+                                for c_name, c_w in cols:
+                                    pdf.cell(c_w, 8, c_name, 1, 0, 'C', 1)
+                                pdf.ln()
+                                
+                                # Données tableau (Trié par Clone puis VAF)
+                                pdf.set_font("Arial", '', 9)
+                                d_table = d_temp.sort_values(["Cluster_Label", "Allelic_ratio"], ascending=[True, False]).head(15)
+                                
+                                for _, row in d_table.iterrows():
+                                    gene = str(row.get("Gene_symbol", ""))[:10]
+                                    var = str(row.get("Variant", ""))[:25]
+                                    vaf = f"{row.get('Allelic_ratio', 0):.2f}"
+                                    clone = str(row.get("Cluster_Label", ""))
+                                    acmg = str(row.get("ACMG_Class", ""))[:20]
+                                    
+                                    pdf.cell(25, 7, gene, 1)
+                                    pdf.cell(50, 7, var, 1)
+                                    pdf.cell(20, 7, vaf, 1, 0, 'C')
+                                    pdf.cell(20, 7, clone, 1, 0, 'C')
+                                    pdf.cell(40, 7, acmg, 1)
+                                    pdf.ln()
+                                    
+                            except Exception as e:
+                                st.warning(f"Skipped {pat}: {e}")
                 
-                progress_bar.empty()
-                zip_buffer.seek(0)
-                
+                # Téléchargement
+                pdf_bytes = pdf.output(dest='S').encode('latin-1', 'ignore')
                 st.download_button(
-                    label="📥 Télécharger l'archive ZIP",
-                    data=zip_buffer,
-                    file_name=f"Atlas_Clonal_Analysis_{datetime.now().strftime('%Y%m%d')}.zip",
-                    mime="application/zip",
+                    label="📥 Télécharger le Rapport PDF",
+                    data=pdf_bytes,
+                    file_name=f"Rapport_Clonal_Global_{datetime.now().strftime('%Y%m%d')}.pdf",
+                    mime="application/pdf",
                     type="primary"
                 )
+                progress_bar.empty()
 
         else:
-            st.warning("Colonnes 'Pseudo' ou 'Allelic_ratio' manquantes.")
+            st.warning("Données insuffisantes (Pseudo/VAF manquants).")
 elif not submitted:
     st.info("👈 Chargez fichier + Lancer.")
