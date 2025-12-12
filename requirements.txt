@@ -10,3 +10,4 @@ fpdf
 scikit-learn
 matplotlib
 seaborn
+json
