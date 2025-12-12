@@ -72,34 +72,30 @@ def render_custom_header():
     </div>
     """, unsafe_allow_html=True)
 
-# --- GESTIONNAIRE DE CONFIGURATION (CORRIGÉ) ---
+# --- GESTIONNAIRE DE CONFIGURATION ---
 def render_config_manager():
     """Gère l'upload et le download des configurations de filtres via JSON."""
     st.sidebar.header("0. Configuration")
     
-    # 1. Charger une config
     uploaded_config = st.sidebar.file_uploader("📂 Charger une stratégie", type=["json"], key="config_uploader")
     
     if uploaded_config is not None:
         try:
             data = json.load(uploaded_config)
-            # On met à jour le session_state avec les valeurs du fichier
+            # On met à jour le session_state
             for key, value in data.items():
                 st.session_state[key] = value
             
             st.sidebar.success("Configuration chargée !")
             
-            # BOUTON POUR FORCER LE RAFRAÎCHISSEMENT VISUEL
-            # C'est nécessaire car modifier le session_state ne met pas toujours à jour 
-            # les widgets du formulaire instantanément sans rerun.
+            # Bouton pour forcer le rafraîchissement visuel des widgets
             if st.sidebar.button("🔄 Appliquer les filtres chargés"):
                 st.rerun()
                 
         except Exception as e:
             st.sidebar.error(f"Erreur config: {e}")
 
-    # 2. Sauvegarder la config actuelle
-    # Liste des clés (keys) correspondant aux widgets du formulaire
+    # Sauvegarder la config actuelle
     keys_to_save = [
         "sort_choice", "min_dp", "allelic_min", "min_ad", "max_cohort_freq",
         "gnomad_max", "min_cadd_val", "use_acmg", "use_gnomad", 
@@ -107,7 +103,6 @@ def render_config_manager():
         "sel_var", "sel_put", "sel_clin", "use_msc_strict"
     ]
     
-    # On récupère les valeurs actuelles présentes dans le session_state
     current_config = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
     
     if current_config:
@@ -171,7 +166,7 @@ def get_string_network(gene_symbol, limit=10):
     except: return []
     return []
 
-# --- Fonction PDF (Rapport de base) ---
+# --- Fonction PDF (Rapport) ---
 def create_pdf_report(patient_id, df_variants, user_comments=""):
     class PDF(FPDF):
         def header(self):
@@ -446,7 +441,6 @@ def compute_enrichment(df, pathway_genes):
 # 4. INTERFACE
 # ---------------------------------------
 
-# APPEL DE LA FONCTION HEADER ICI
 render_custom_header()
 
 if "analysis_done" not in st.session_state:
@@ -456,7 +450,6 @@ if "analysis_done" not in st.session_state:
     st.session_state["logs"] = []
 
 with st.sidebar:
-    # --- APPEL DU GESTIONNAIRE DE CONFIG ---
     render_config_manager()
 
     st.header("1. Données")
@@ -471,9 +464,31 @@ with st.sidebar:
             if "Putative_impact" in df_raw.columns: p_opts = sorted(df_raw["Putative_impact"].fillna("Non Renseigné").unique())
             if "Clinvar_significance" in df_raw.columns: c_opts = sorted(df_raw["Clinvar_significance"].fillna("Non Renseigné").unique())
 
+    # --- LOGIQUE DE RESTAURATION INTELLIGENTE DES FILTRES ---
+    # Pour que les filtres avancés soient "Tous sélectionnés" par défaut s'il n'y a pas de JSON,
+    # ou pour nettoyer les sélections JSON si elles ne matchent pas le fichier actuel.
+    
+    def sync_multiselect_state(key, options):
+        # Cas 1 : La clé existe (chargement JSON ou changement précédent)
+        if key in st.session_state and st.session_state[key]:
+            # On ne garde que les valeurs qui existent vraiment dans le fichier chargé
+            valid_selection = [x for x in st.session_state[key] if x in options]
+            st.session_state[key] = valid_selection
+        
+        # Cas 2 : La clé n'existe pas (Premier chargement) OU la sélection est vide
+        # On remet "Tout sélectionner" par défaut pour imiter le comportement d'avant
+        if (key not in st.session_state) or (not st.session_state[key] and options):
+            st.session_state[key] = options
+
+    # On applique cette logique si un fichier est chargé
+    if df_raw is not None:
+        sync_multiselect_state("sel_var", v_opts)
+        sync_multiselect_state("sel_put", p_opts)
+        sync_multiselect_state("sel_clin", c_opts)
+    # --------------------------------------------------------
+
     with st.form("params"):
         st.header("2. Paramètres")
-        # --- AJOUT DES CLÉS 'key=' POUR LA SAUVEGARDE ---
         sort_choice = st.selectbox("Tri initial", ["Classification ACMG (Priorité)", "Score CADD (Décroissant)", "Patient (A-Z)"], key="sort_choice")
         
         c1, c2 = st.columns(2)
@@ -501,9 +516,11 @@ with st.sidebar:
             )
 
         with st.expander("Avancé & Filtres MSC"):
-            sel_var = st.multiselect("Effet", v_opts, default=v_opts, key="sel_var")
-            sel_put = st.multiselect("Impact", p_opts, default=p_opts, key="sel_put")
-            sel_clin = st.multiselect("ClinVar", c_opts, default=c_opts, key="sel_clin")
+            # Ici, on n'utilise plus 'default=', car 'sync_multiselect_state' a déjà préparé le session_state
+            sel_var = st.multiselect("Effet", options=v_opts, key="sel_var")
+            sel_put = st.multiselect("Impact", options=p_opts, key="sel_put")
+            sel_clin = st.multiselect("ClinVar", options=c_opts, key="sel_clin")
+            
             genes_ex = st.text_area("Exclure Gènes", "KMT2C, CHEK2, TTN, MUC16", key="genes_ex")
             pseudo_ex = st.text_area("Exclure Patients", "", key="pseudo_ex")
             
@@ -547,7 +564,6 @@ if submitted and df_raw is not None:
         st.session_state["df_res"] = res
         st.session_state["kpis"] = (ini, fin)
         st.session_state["logs"] = logs
-        # NOTE: La ligne conflictuelle st.session_state["use_acmg"] = use_acmg a été supprimée.
         
         user_pathways, file_names = load_local_pathways()
         st.session_state["gmt_files"] = file_names
