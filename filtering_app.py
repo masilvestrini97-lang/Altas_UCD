@@ -535,7 +535,6 @@ if submitted and df_raw is not None:
         st.session_state["df_res"] = res
         st.session_state["kpis"] = (ini, fin)
         st.session_state["logs"] = logs
-        st.session_state["use_acmg"] = use_acmg
         
         user_pathways, file_names = load_local_pathways()
         st.session_state["gmt_files"] = file_names
