@@ -2,7 +2,6 @@ import os
 import io
 import re
 import glob
-import zipfile
 import requests
 import json
 import tempfile
@@ -30,8 +29,6 @@ from sklearn.cluster import KMeans
 st.set_page_config(page_title="NGS ATLAS Explorer", layout="wide", page_icon="🧬")
 
 MSC_LOCAL_FILENAME = "MSC_CI99_v1.7.txt"
-
-# --- DESIGN PERSONNALISÉ (CSS) ---
 HEADER_IMG_URL = "https://raw.githubusercontent.com/masilvestrini97-lang/Altas_UCD/refs/heads/main/images.jpeg"
 
 def render_custom_header():
@@ -65,57 +62,13 @@ def render_custom_header():
         text-shadow: 1px 1px 2px #000000;
     }}
     </style>
-
     <div class="header-container">
         <div class="header-title">🧬 NGS ATLAS Explorer</div>
         <div class="header-subtitle">Dev by Castleman Team</div>
     </div>
     """, unsafe_allow_html=True)
 
-# --- GESTIONNAIRE DE CONFIGURATION ---
-def render_config_manager():
-    """Gère l'upload et le download des configurations de filtres via JSON."""
-    st.sidebar.header("0. Configuration")
-    
-    uploaded_config = st.sidebar.file_uploader("📂 Charger une stratégie", type=["json"], key="config_uploader")
-    
-    if uploaded_config is not None:
-        try:
-            data = json.load(uploaded_config)
-            # On met à jour le session_state
-            for key, value in data.items():
-                st.session_state[key] = value
-            
-            st.sidebar.success("Configuration chargée !")
-            
-            # Bouton pour forcer le rafraîchissement visuel des widgets
-            if st.sidebar.button("🔄 Appliquer les filtres chargés"):
-                st.rerun()
-                
-        except Exception as e:
-            st.sidebar.error(f"Erreur config: {e}")
-
-    # Sauvegarder la config actuelle
-    keys_to_save = [
-        "sort_choice", "min_dp", "allelic_min", "min_ad", "max_cohort_freq",
-        "gnomad_max", "min_cadd_val", "use_acmg", "use_gnomad", 
-        "acmg_to_keep", "genes_ex", "pseudo_ex", 
-        "sel_var", "sel_put", "sel_clin", "use_msc_strict"
-    ]
-    
-    current_config = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
-    
-    if current_config:
-        json_str = json.dumps(current_config, indent=4)
-        st.sidebar.download_button(
-            label="💾 Sauvegarder les filtres actuels",
-            data=json_str,
-            file_name="ngs_filter_strategy.json",
-            mime="application/json"
-        )
-    st.sidebar.markdown("---")
-
-# --- Fonctions utilitaires ---
+# --- FONCTIONS UTILITAIRES ---
 
 def clean_text(val):
     if not isinstance(val, str): return ""
@@ -166,7 +119,7 @@ def get_string_network(gene_symbol, limit=10):
     except: return []
     return []
 
-# --- Fonction PDF (Rapport) ---
+# --- RAPPORT PDF ---
 def create_pdf_report(patient_id, df_variants, user_comments=""):
     class PDF(FPDF):
         def header(self):
@@ -449,44 +402,85 @@ if "analysis_done" not in st.session_state:
     st.session_state["kpis"] = (0, 0)
     st.session_state["logs"] = []
 
-with st.sidebar:
-    render_config_manager()
+# ==========================================================
+# PARTIE SIDEBAR - RESTRUCTURÉE POUR LA ROBUSTESSE
+# ==========================================================
 
+with st.sidebar:
     st.header("1. Données")
+    # On charge le CSV AVANT la config pour connaître les options disponibles
     uploaded_file = st.file_uploader("Fichier Variants", type=["csv", "tsv", "txt"])
+    
     df_raw = None
     v_opts, p_opts, c_opts = [], [], []
 
+    # Calcul des options si le fichier est là
     if uploaded_file:
         df_raw = load_variants(uploaded_file)
         if df_raw is not None:
-            if "Variant_effect" in df_raw.columns: v_opts = sorted(df_raw["Variant_effect"].fillna("Non Renseigné").unique())
-            if "Putative_impact" in df_raw.columns: p_opts = sorted(df_raw["Putative_impact"].fillna("Non Renseigné").unique())
-            if "Clinvar_significance" in df_raw.columns: c_opts = sorted(df_raw["Clinvar_significance"].fillna("Non Renseigné").unique())
+            if "Variant_effect" in df_raw.columns: 
+                v_opts = sorted(df_raw["Variant_effect"].fillna("Non Renseigné").unique())
+            if "Putative_impact" in df_raw.columns: 
+                p_opts = sorted(df_raw["Putative_impact"].fillna("Non Renseigné").unique())
+            if "Clinvar_significance" in df_raw.columns: 
+                c_opts = sorted(df_raw["Clinvar_significance"].fillna("Non Renseigné").unique())
 
-    # --- LOGIQUE DE RESTAURATION INTELLIGENTE DES FILTRES ---
-    # Pour que les filtres avancés soient "Tous sélectionnés" par défaut s'il n'y a pas de JSON,
-    # ou pour nettoyer les sélections JSON si elles ne matchent pas le fichier actuel.
+    # --- LOGIQUE DE GESTION DES SELECTIONS PAR DÉFAUT ---
+    # Si c'est la première fois qu'on voit ces options, on coche tout par défaut.
+    # Si on a chargé un JSON, les valeurs sont DÉJÀ dans session_state, donc on ne touche rien.
     
-    def sync_multiselect_state(key, options):
-        # Cas 1 : La clé existe (chargement JSON ou changement précédent)
-        if key in st.session_state and st.session_state[key]:
-            # On ne garde que les valeurs qui existent vraiment dans le fichier chargé
-            valid_selection = [x for x in st.session_state[key] if x in options]
-            st.session_state[key] = valid_selection
-        
-        # Cas 2 : La clé n'existe pas (Premier chargement) OU la sélection est vide
-        # On remet "Tout sélectionner" par défaut pour imiter le comportement d'avant
-        if (key not in st.session_state) or (not st.session_state[key] and options):
-            st.session_state[key] = options
-
-    # On applique cette logique si un fichier est chargé
     if df_raw is not None:
-        sync_multiselect_state("sel_var", v_opts)
-        sync_multiselect_state("sel_put", p_opts)
-        sync_multiselect_state("sel_clin", c_opts)
-    # --------------------------------------------------------
+        if "sel_var" not in st.session_state: st.session_state["sel_var"] = v_opts
+        if "sel_put" not in st.session_state: st.session_state["sel_put"] = p_opts
+        if "sel_clin" not in st.session_state: st.session_state["sel_clin"] = c_opts
 
+    # ------------------------------------------------------------
+    # GESTIONNAIRE DE CONFIGURATION (Placé APRÈS le chargement CSV)
+    # ------------------------------------------------------------
+    st.header("0. Configuration")
+    uploaded_config = st.file_uploader("📂 Charger stratégie (JSON)", type=["json"], key="config_uploader")
+    
+    if uploaded_config is not None:
+        try:
+            # Bouton pour appliquer explicitement (plus fiable)
+            if st.button("🔄 APPLIQUER LA CONFIGURATION"):
+                data = json.load(uploaded_config)
+                
+                # Mise à jour du session state
+                for key, value in data.items():
+                    # --- NETTOYAGE DES FILTRES ---
+                    # Si le JSON demande "Missense" mais que "Missense" n'existe pas dans ce fichier,
+                    # on le retire pour éviter que Streamlit ne plante.
+                    if key == "sel_var" and isinstance(value, list):
+                        value = [x for x in value if x in v_opts]
+                    elif key == "sel_put" and isinstance(value, list):
+                        value = [x for x in value if x in p_opts]
+                    elif key == "sel_clin" and isinstance(value, list):
+                        value = [x for x in value if x in c_opts]
+                    
+                    st.session_state[key] = value
+                
+                st.success("Configuration chargée !")
+                st.rerun() # Force le rafraîchissement immédiat
+                
+        except Exception as e:
+            st.error(f"Erreur config: {e}")
+
+    # Sauvegarde (toujours disponible)
+    keys_to_save = ["sort_choice", "min_dp", "allelic_min", "min_ad", "max_cohort_freq",
+                    "gnomad_max", "min_cadd_val", "use_acmg", "use_gnomad", 
+                    "acmg_to_keep", "genes_ex", "pseudo_ex", 
+                    "sel_var", "sel_put", "sel_clin", "use_msc_strict"]
+    
+    current_config = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
+    if current_config:
+        st.download_button("💾 Sauvegarder Config", json.dumps(current_config, indent=4), "ngs_filter.json", "application/json")
+    
+    st.markdown("---")
+
+    # ------------------------------------------------------------
+    # FORMULAIRE (Widgets liés au session_state)
+    # ------------------------------------------------------------
     with st.form("params"):
         st.header("2. Paramètres")
         sort_choice = st.selectbox("Tri initial", ["Classification ACMG (Priorité)", "Score CADD (Décroissant)", "Patient (A-Z)"], key="sort_choice")
@@ -508,15 +502,10 @@ with st.sidebar:
             use_gnomad = st.checkbox("Filtre gnomAD", True, key="use_gnomad")
             
             acmg_options = ["Pathogenic", "Likely Pathogenic", "VUS", "Likely Benign", "Benign", "Non calculé"]
-            acmg_to_keep = st.multiselect(
-                "Filtre Global ACMG", 
-                options=acmg_options, 
-                default=acmg_options,
-                key="acmg_to_keep"
-            )
+            acmg_to_keep = st.multiselect("Filtre Global ACMG", options=acmg_options, default=acmg_options, key="acmg_to_keep")
 
         with st.expander("Avancé & Filtres MSC"):
-            # Ici, on n'utilise plus 'default=', car 'sync_multiselect_state' a déjà préparé le session_state
+            # Les options sont maintenant correctement définies et synchronisées
             sel_var = st.multiselect("Effet", options=v_opts, key="sel_var")
             sel_put = st.multiselect("Impact", options=p_opts, key="sel_put")
             sel_clin = st.multiselect("ClinVar", options=c_opts, key="sel_clin")
