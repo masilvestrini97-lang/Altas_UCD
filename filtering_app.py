@@ -4,6 +4,7 @@ import re
 import glob
 import zipfile
 import requests
+import json  # <--- AJOUT : Nécessaire pour sauvegarder/charger les configs
 from datetime import datetime
 import numpy as np
 import pandas as pd
@@ -16,7 +17,7 @@ from scipy.stats import hypergeom
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 from fpdf import FPDF
 from streamlit_agraph import agraph, Node, Edge, Config
-from sklearn.cluster import KMeans  # <--- AJOUT POUR L'ANALYSE CLONALE
+from sklearn.cluster import KMeans
 
 # ---------------------------------------
 # 1. CONFIGURATION & DESIGN
@@ -66,6 +67,46 @@ def render_custom_header():
         <div class="header-subtitle">Dev by Castleman Team</div>
     </div>
     """, unsafe_allow_html=True)
+
+# --- NOUVELLE FONCTION : GESTIONNAIRE DE CONFIGURATION ---
+def render_config_manager():
+    """Gère l'upload et le download des configurations de filtres via JSON."""
+    st.sidebar.header("0. Configuration")
+    
+    # 1. Charger une config
+    uploaded_config = st.sidebar.file_uploader("📂 Charger une stratégie", type=["json"], key="config_uploader")
+    
+    if uploaded_config is not None:
+        try:
+            data = json.load(uploaded_config)
+            # On met à jour le session_state avec les valeurs du fichier
+            for key, value in data.items():
+                st.session_state[key] = value
+            st.sidebar.success("Configuration chargée ! Veuillez valider le formulaire.")
+        except Exception as e:
+            st.sidebar.error(f"Erreur config: {e}")
+
+    # 2. Sauvegarder la config actuelle
+    # Liste des clés (keys) correspondant aux widgets plus bas
+    keys_to_save = [
+        "sort_choice", "min_dp", "allelic_min", "min_ad", "max_cohort_freq",
+        "gnomad_max", "min_cadd_val", "use_acmg", "use_gnomad", 
+        "acmg_to_keep", "genes_ex", "pseudo_ex", 
+        "sel_var", "sel_put", "sel_clin", "use_msc_strict"
+    ]
+    
+    # On récupère les valeurs actuelles présentes dans le session_state
+    current_config = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
+    
+    if current_config:
+        json_str = json.dumps(current_config, indent=4)
+        st.sidebar.download_button(
+            label="💾 Sauvegarder les filtres actuels",
+            data=json_str,
+            file_name="ngs_filter_strategy.json",
+            mime="application/json"
+        )
+    st.sidebar.markdown("---")
 
 # --- Fonctions utilitaires ---
 
@@ -324,7 +365,7 @@ def apply_filtering_and_scoring(
         df["ACMG_Class"] = "Non calculé"
         df["ACMG_Rank"] = 0
 
-    # --- FILTRE ACMG GLOBAL AJOUTÉ ICI ---
+    # --- FILTRE ACMG GLOBAL ---
     if acmg_keep_list:
         last_count = len(df)
         df = df[df["ACMG_Class"].isin(acmg_keep_list)]
@@ -403,6 +444,9 @@ if "analysis_done" not in st.session_state:
     st.session_state["logs"] = []
 
 with st.sidebar:
+    # --- APPEL DU GESTIONNAIRE DE CONFIG ---
+    render_config_manager()
+
     st.header("1. Données")
     uploaded_file = st.file_uploader("Fichier Variants", type=["csv", "tsv", "txt"])
     df_raw = None
@@ -417,39 +461,39 @@ with st.sidebar:
 
     with st.form("params"):
         st.header("2. Paramètres")
-        sort_choice = st.selectbox("Tri initial", ["Classification ACMG (Priorité)", "Score CADD (Décroissant)", "Patient (A-Z)"])
+        # --- AJOUT DES CLÉS 'key=' POUR LA SAUVEGARDE ---
+        sort_choice = st.selectbox("Tri initial", ["Classification ACMG (Priorité)", "Score CADD (Décroissant)", "Patient (A-Z)"], key="sort_choice")
         
         c1, c2 = st.columns(2)
         with c1:
-            min_dp = st.number_input("Depth Min", 0, 10000, 50)
-            allelic_min = st.number_input("VAF Min", 0.0, 1.0, 0.02)
+            min_dp = st.number_input("Depth Min", 0, 10000, 50, key="min_dp")
+            allelic_min = st.number_input("VAF Min", 0.0, 1.0, 0.02, key="allelic_min")
         with c2:
-            min_ad = st.number_input("Alt Depth Min", 0, 1000, 5)
-            max_cohort_freq = st.slider("Max Freq Cohorte", 0.0, 1.0, 1.0, 0.05)
+            min_ad = st.number_input("Alt Depth Min", 0, 1000, 5, key="min_ad")
+            max_cohort_freq = st.slider("Max Freq Cohorte", 0.0, 1.0, 1.0, 0.05, key="max_cohort_freq")
 
         c3, c4 = st.columns(2)
         with c3:
-            gnomad_max = st.number_input("gnomAD Max", 0.0, 1.0, 0.001, format="%.4f")
-            min_cadd_val = st.number_input("CADD Min (0=all)", 0.0, 60.0, 0.0)
+            gnomad_max = st.number_input("gnomAD Max", 0.0, 1.0, 0.001, format="%.4f", key="gnomad_max")
+            min_cadd_val = st.number_input("CADD Min (0=all)", 0.0, 60.0, 0.0, key="min_cadd_val")
         with c4:
-            use_acmg = st.checkbox("Calculer ACMG", value=True)
-            use_gnomad = st.checkbox("Filtre gnomAD", True)
+            use_acmg = st.checkbox("Calculer ACMG", value=True, key="use_acmg")
+            use_gnomad = st.checkbox("Filtre gnomAD", True, key="use_gnomad")
             
-            # --- AJOUT DU FILTRE ACMG GLOBAL ICI ---
             acmg_options = ["Pathogenic", "Likely Pathogenic", "VUS", "Likely Benign", "Benign", "Non calculé"]
             acmg_to_keep = st.multiselect(
                 "Filtre Global ACMG", 
                 options=acmg_options, 
-                default=acmg_options
+                default=acmg_options,
+                key="acmg_to_keep"
             )
-            # ---------------------------------------
 
         with st.expander("Avancé & Filtres MSC"):
-            sel_var = st.multiselect("Effet", v_opts, default=v_opts)
-            sel_put = st.multiselect("Impact", p_opts, default=p_opts)
-            sel_clin = st.multiselect("ClinVar", c_opts, default=c_opts)
-            genes_ex = st.text_area("Exclure Gènes", "KMT2C, CHEK2, TTN, MUC16")
-            pseudo_ex = st.text_area("Exclure Patients", "")
+            sel_var = st.multiselect("Effet", v_opts, default=v_opts, key="sel_var")
+            sel_put = st.multiselect("Impact", p_opts, default=p_opts, key="sel_put")
+            sel_clin = st.multiselect("ClinVar", c_opts, default=c_opts, key="sel_clin")
+            genes_ex = st.text_area("Exclure Gènes", "KMT2C, CHEK2, TTN, MUC16", key="genes_ex")
+            pseudo_ex = st.text_area("Exclure Patients", "", key="pseudo_ex")
             
             st.markdown("---")
             st.markdown("**🛡️ MSC Filter**")
@@ -462,7 +506,7 @@ with st.sidebar:
                 st.warning("MSC local non trouvé.")
                 msc_file_upload = st.file_uploader("Upload MSC", type=["txt", "tsv", "csv"])
 
-            use_msc_filter_strict = st.checkbox("Exclure si CADD < MSC", value=False)
+            use_msc_filter_strict = st.checkbox("Exclure si CADD < MSC", value=False, key="use_msc_strict")
 
         st.header("3. Pathways")
         submitted = st.form_submit_button("🚀 LANCER L'ANALYSE")
@@ -482,7 +526,7 @@ if submitted and df_raw is not None:
         g_list, p_list, 
         min_cadd_val, sel_var, sel_put, sel_clin, sort_choice, use_acmg,
         use_msc_filter_strict,
-        acmg_to_keep # <--- PASSAGE DE LA LISTE ICI
+        acmg_to_keep 
     )
 
     if err: st.error(err)
@@ -517,7 +561,7 @@ if st.session_state["analysis_done"]:
     k2.metric("Final", n_fin)
     k3.metric("Ratio", f"{round(n_fin/n_ini*100, 2) if n_ini>0 else 0}%")
 
-    # AJOUT DE L'ONGLET "Evolution Clonale" ICI
+    # Onglets
     tabs = st.tabs(["📋 Tableau", "🔍 Inspecteur", "🧩 Corrélation", "📊 Spectre", "📍 Lollipops", "📈 QC", "🧬 Pathways", "🕸️ PPI", "🧬 Évolution Clonale"])
 
     # --- TAB 1: AGGRID ---
@@ -526,8 +570,7 @@ if st.session_state["analysis_done"]:
         
         df_to_show = df_res.copy() 
         
-        # NOTE : Le filtre global (Sidebar) a DÉJÀ été appliqué.
-        # Ici, on remet le filtre local pour affiner visuellement si besoin.
+        # Filtre local d'affichage ACMG
         if "ACMG_Class" in df_to_show.columns:
             all_acmg_classes = sorted(df_to_show["ACMG_Class"].astype(str).unique())
             selected_acmg = st.multiselect("Filtrer l'affichage :", options=all_acmg_classes, default=all_acmg_classes)
@@ -706,15 +749,13 @@ if st.session_state["analysis_done"]:
                         agraph(nodes=nodes, edges=edges, config=Config(width=700, height=500, directed=False, physics=True))
                     else: st.warning("Pas d'interactions.")
     
-    # --- TAB 9: EVOLUTION CLONALE (AVEC EXPORT DE MASSE) ---
-    # --- TAB 9: EVOLUTION CLONALE (AVEC RAPPORT PDF GLOBAL) ---
+    # --- TAB 9: EVOLUTION CLONALE ---
     with tabs[8]:
         st.subheader("🧬 Analyse de l'Architecture Clonale")
         
-        # Vérification des colonnes nécessaires
         if "Pseudo" in df_res.columns and "Allelic_ratio" in df_res.columns:
             
-            # --- SECTION 1 : VISUALISATION INTERACTIVE (Reste inchangée) ---
+            # --- SECTION 1 : VISUALISATION INTERACTIVE ---
             c_sel1, c_sel2 = st.columns([1, 3])
             with c_sel1:
                 patients_list = sorted(df_res["Pseudo"].astype(str).unique())
@@ -780,26 +821,24 @@ if st.session_state["analysis_done"]:
                 pdf = PDFReport()
                 progress_bar = st.progress(0)
                 
-                # Création d'un dossier temporaire pour les images
                 with tempfile.TemporaryDirectory() as tmp_dir:
                     total_pats = len(patients_list)
                     
                     for idx, pat in enumerate(patients_list):
                         progress_bar.progress((idx + 1) / total_pats)
                         
-                        # Filtrage et Calcul
                         d_temp = df_res[df_res["Pseudo"] == pat].copy().dropna(subset=["Allelic_ratio"])
                         
                         if len(d_temp) >= 3:
                             try:
                                 # 1. Calculs Clusters
-                                km = KMeans(n_clusters=3, random_state=42, n_init=10) # Force 3 clusters pour standardisation
+                                km = KMeans(n_clusters=3, random_state=42, n_init=10)
                                 d_temp["Cluster_ID"] = km.fit_predict(d_temp[["Allelic_ratio"]].values)
                                 cents = d_temp.groupby("Cluster_ID")["Allelic_ratio"].mean().sort_values().index
                                 cmap = {oid: f"C{i+1}" for i, oid in enumerate(cents)}
                                 d_temp["Cluster_Label"] = d_temp["Cluster_ID"].map(cmap)
                                 
-                                # 2. Génération Graphique Matplotlib (Statique pour PDF)
+                                # 2. Génération Graphique Matplotlib
                                 plt.figure(figsize=(10, 5))
                                 sns.histplot(data=d_temp, x="Allelic_ratio", hue="Cluster_Label", 
                                              bins=30, kde=True, palette="viridis", element="step")
@@ -808,7 +847,6 @@ if st.session_state["analysis_done"]:
                                 plt.xlabel("VAF")
                                 plt.ylabel("Count")
                                 
-                                # Sauvegarde image
                                 img_path = os.path.join(tmp_dir, f"{clean_text(pat)}.png")
                                 plt.savefig(img_path, dpi=100, bbox_inches='tight')
                                 plt.close()
@@ -818,22 +856,18 @@ if st.session_state["analysis_done"]:
                                 pdf.set_font("Arial", 'B', 16)
                                 pdf.cell(0, 10, f"Patient : {pat}", 0, 1, 'L')
                                 
-                                # Image
                                 pdf.image(img_path, x=10, y=30, w=190)
                                 
-                                # Tableau
                                 pdf.set_y(130)
                                 pdf.set_font("Arial", 'B', 10)
                                 pdf.cell(0, 10, "Tableau des Variants (Top 15 par VAF)", 0, 1)
                                 
-                                # En-têtes tableau
                                 cols = [("Gene", 25), ("Variant", 50), ("VAF", 20), ("Clone", 20), ("ACMG", 40)]
                                 pdf.set_fill_color(220, 220, 220)
                                 for c_name, c_w in cols:
                                     pdf.cell(c_w, 8, c_name, 1, 0, 'C', 1)
                                 pdf.ln()
                                 
-                                # Données tableau (Trié par Clone puis VAF)
                                 pdf.set_font("Arial", '', 9)
                                 d_table = d_temp.sort_values(["Cluster_Label", "Allelic_ratio"], ascending=[True, False]).head(15)
                                 
@@ -854,7 +888,6 @@ if st.session_state["analysis_done"]:
                             except Exception as e:
                                 st.warning(f"Skipped {pat}: {e}")
                 
-                # Téléchargement
                 pdf_bytes = pdf.output(dest='S').encode('latin-1', 'ignore')
                 st.download_button(
                     label="📥 Télécharger le Rapport PDF",
