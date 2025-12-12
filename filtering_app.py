@@ -4,8 +4,10 @@ import re
 import glob
 import zipfile
 import requests
-import json  # <--- AJOUT : Nécessaire pour sauvegarder/charger les configs
+import json
+import tempfile
 from datetime import datetime
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -13,7 +15,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 from scipy.stats import hypergeom
 
-# --- IMPORTS TIERS ---
+# --- IMPORTS POUR VISUALISATION & RAPPORT ---
+import matplotlib.pyplot as plt
+import seaborn as sns
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 from fpdf import FPDF
 from streamlit_agraph import agraph, Node, Edge, Config
@@ -68,7 +72,7 @@ def render_custom_header():
     </div>
     """, unsafe_allow_html=True)
 
-# --- NOUVELLE FONCTION : GESTIONNAIRE DE CONFIGURATION ---
+# --- GESTIONNAIRE DE CONFIGURATION (CORRIGÉ) ---
 def render_config_manager():
     """Gère l'upload et le download des configurations de filtres via JSON."""
     st.sidebar.header("0. Configuration")
@@ -82,12 +86,20 @@ def render_config_manager():
             # On met à jour le session_state avec les valeurs du fichier
             for key, value in data.items():
                 st.session_state[key] = value
-            st.sidebar.success("Configuration chargée ! Veuillez valider le formulaire.")
+            
+            st.sidebar.success("Configuration chargée !")
+            
+            # BOUTON POUR FORCER LE RAFRAÎCHISSEMENT VISUEL
+            # C'est nécessaire car modifier le session_state ne met pas toujours à jour 
+            # les widgets du formulaire instantanément sans rerun.
+            if st.sidebar.button("🔄 Appliquer les filtres chargés"):
+                st.rerun()
+                
         except Exception as e:
             st.sidebar.error(f"Erreur config: {e}")
 
     # 2. Sauvegarder la config actuelle
-    # Liste des clés (keys) correspondant aux widgets plus bas
+    # Liste des clés (keys) correspondant aux widgets du formulaire
     keys_to_save = [
         "sort_choice", "min_dp", "allelic_min", "min_ad", "max_cohort_freq",
         "gnomad_max", "min_cadd_val", "use_acmg", "use_gnomad", 
@@ -159,7 +171,7 @@ def get_string_network(gene_symbol, limit=10):
     except: return []
     return []
 
-# --- Fonction PDF ---
+# --- Fonction PDF (Rapport de base) ---
 def create_pdf_report(patient_id, df_variants, user_comments=""):
     class PDF(FPDF):
         def header(self):
@@ -535,6 +547,7 @@ if submitted and df_raw is not None:
         st.session_state["df_res"] = res
         st.session_state["kpis"] = (ini, fin)
         st.session_state["logs"] = logs
+        # NOTE: La ligne conflictuelle st.session_state["use_acmg"] = use_acmg a été supprimée.
         
         user_pathways, file_names = load_local_pathways()
         st.session_state["gmt_files"] = file_names
@@ -803,11 +816,7 @@ if st.session_state["analysis_done"]:
             st.info("Génère un PDF unique avec une page par patient (Graphique + Tableau).")
             
             if st.button("Générer le PDF Global"):
-                import matplotlib.pyplot as plt
-                import seaborn as sns
-                from fpdf import FPDF
-                import tempfile
-
+                
                 class PDFReport(FPDF):
                     def header(self):
                         self.set_font('Arial', 'B', 10)
