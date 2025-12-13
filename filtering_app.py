@@ -584,7 +584,7 @@ if st.session_state["analysis_done"]:
     k2.metric("Final", n_fin)
     k3.metric("Ratio", f"{round(n_fin/n_ini*100, 2) if n_ini>0 else 0}%")
 
-    # Onglets
+   # Onglets
     tabs = st.tabs([
         "📋 Tableau", 
         "🔍 Inspecteur", 
@@ -595,7 +595,9 @@ if st.session_state["analysis_done"]:
         "🧬 Pathways", 
         "🕸️ PPI", 
         "🧬 Évolution Clonale", 
-        "🔥 Matrice"
+        "🔥 Matrice",
+        "🏙️ Manhattan", # Nouvel onglet 11
+        "📊 TMB"        # Nouvel onglet 12
     ])
 
     # --- TAB 1: AGGRID ---
@@ -1082,6 +1084,127 @@ if st.session_state["analysis_done"]:
 
         else:
             st.warning("Aucun variant pertinent trouvé.")
+    # --- TAB 11: MANHATTAN PLOT ---
+    with tabs[10]:
+        st.subheader("🏙️ Manhattan Plot (Variants & Impact)")
+        st.info("Visualisation de l'impact des variants (CADD) sur l'ensemble du génome.")
+
+        # Préparation des données
+        df_man = df_res.copy()
+        
+        # Vérification des colonnes nécessaires
+        if "Chromosome" in df_man.columns and "CADD_phred" in df_man.columns:
+            
+            # Nettoyage et Tri des Chromosomes
+            # On crée une colonne numérique temporaire pour le tri (1..22, X=23, Y=24, MT=25)
+            def sort_chrom(c):
+                c = str(c).replace("chr", "").upper().strip()
+                if c.isdigit(): return int(c)
+                if c == "X": return 23
+                if c == "Y": return 24
+                if c == "M" or c == "MT": return 25
+                return 26 # Autres
+            
+            df_man["Chr_Num"] = df_man["Chromosome"].apply(sort_chrom)
+            df_man = df_man.sort_values("Chr_Num")
+            
+            # Création du Graphique
+            # On utilise une astuce couleur pour alterner les chromosomes comme un vrai Manhattan
+            df_man["Color_Group"] = df_man["Chr_Num"] % 2 
+            
+            fig_man = px.scatter(
+                df_man, 
+                x="Chromosome", 
+                y="CADD_phred",
+                color="Color_Group", # Alterne les couleurs (Bleu/Rouge par ex)
+                color_continuous_scale=["#3c4e68", "#5b8cbe"], # Nuances de gris/bleu pro
+                hover_data=["Gene_symbol", "Variant", "Pseudo", "ACMG_Class"],
+                size="CADD_phred", # Les points importants sont plus gros
+                size_max=15
+            )
+            
+            # Ligne de seuil CADD 20 (Pathogénicité probable)
+            fig_man.add_hline(y=20, line_dash="dash", line_color="red", annotation_text="Seuil CADD > 20")
+            
+            fig_man.update_layout(
+                title="Distribution Génomique des Scores CADD",
+                xaxis_title="Chromosomes",
+                yaxis_title="CADD Phred Score",
+                coloraxis_showscale=False, # Cache la barre de couleur technique
+                height=600,
+                xaxis=dict(type='category'), # Force l'ordre catégoriel trié
+                plot_bgcolor="white"
+            )
+            
+            st.plotly_chart(fig_man, use_container_width=True)
+            
+        else:
+            st.warning("Colonnes 'Chromosome' ou 'CADD_phred' manquantes.")
+
+    # --- TAB 12: TMB ANALYSIS ---
+    with tabs[11]:
+        st.subheader("📊 Tumor Mutational Burden (TMB)")
+        st.info("Le TMB est un biomarqueur prédictif pour l'immunothérapie.")
+        
+
+        c_tmb1, c_tmb2 = st.columns([1, 3])
+        
+        with c_tmb1:
+            st.markdown("**1. Configuration Panel**")
+            # Entrée utilisateur pour la taille du panel
+            # Valeurs typiques : WES ~38-50Mb, Panel ciblé ~1-2Mb
+            panel_size_mb = st.number_input(
+                "Taille du Panel séquencé (Mb)", 
+                min_value=0.1, 
+                max_value=3000.0, 
+                value=38.0, # Valeur par défaut = Exome (~38Mb)
+                step=0.1,
+                help="Ex: Whole Exome = ~38 Mb. Panel ciblé = ~1-5 Mb."
+            )
+            
+            tmb_threshold = st.slider("Seuil TMB High (mut/Mb)", 0, 50, 10, help="Seuil clinique habituel : 10 mut/Mb")
+
+        with c_tmb2:
+            if "Pseudo" in df_res.columns:
+                # Calcul : Compter les mutations par patient
+                # Note : Idéalement, on ne compte que les non-synonymes. 
+                # On assume ici que l'utilisateur a déjà filtré les variants synonymes via la Sidebar si besoin.
+                tmb_counts = df_res.groupby("Pseudo")["Variant"].count().reset_index()
+                tmb_counts.columns = ["Pseudo", "Mutation_Count"]
+                
+                # Application de la formule
+                tmb_counts["TMB_Score"] = tmb_counts["Mutation_Count"] / panel_size_mb
+                
+                # Définition du statut (High/Low)
+                tmb_counts["Status"] = tmb_counts["TMB_Score"].apply(lambda x: "TMB-High" if x >= tmb_threshold else "TMB-Low")
+                
+                # Visualisation
+                fig_tmb = px.bar(
+                    tmb_counts, 
+                    x="Pseudo", 
+                    y="TMB_Score",
+                    color="Status",
+                    color_discrete_map={"TMB-High": "#d9534f", "TMB-Low": "#5bc0de"},
+                    text_auto='.1f',
+                    hover_data=["Mutation_Count"],
+                    title=f"Comparaison TMB (Panel size: {panel_size_mb} Mb)"
+                )
+                
+                # Ligne de seuil
+                fig_tmb.add_hline(y=tmb_threshold, line_dash="dash", line_color="black")
+                
+                fig_tmb.update_layout(
+                    yaxis_title="TMB (Mutations / Mb)",
+                    xaxis_title="Patients",
+                    plot_bgcolor="white"
+                )
+                
+                st.plotly_chart(fig_tmb, use_container_width=True)
+                
+                with st.expander("Voir les données TMB"):
+                    st.dataframe(tmb_counts.sort_values("TMB_Score", ascending=False))
+            else:
+                st.warning("Information 'Pseudo' manquante pour grouper par patient.")
 
 if not submitted:
     st.info("👈 Chargez fichier + Lancer.")
