@@ -1084,7 +1084,7 @@ if st.session_state["analysis_done"]:
 
         else:
             st.warning("Aucun variant pertinent trouvé.")
-    # --- TAB 11: MANHATTAN PLOT ---
+    # --- TAB 11: MANHATTAN PLOT (CORRIGÉ) ---
     with tabs[10]:
         st.subheader("🏙️ Manhattan Plot (Variants & Impact)")
         st.info("Visualisation de l'impact des variants (CADD) sur l'ensemble du génome.")
@@ -1095,48 +1095,63 @@ if st.session_state["analysis_done"]:
         # Vérification des colonnes nécessaires
         if "Chromosome" in df_man.columns and "CADD_phred" in df_man.columns:
             
-            # Nettoyage et Tri des Chromosomes
-            # On crée une colonne numérique temporaire pour le tri (1..22, X=23, Y=24, MT=25)
-            def sort_chrom(c):
-                c = str(c).replace("chr", "").upper().strip()
-                if c.isdigit(): return int(c)
-                if c == "X": return 23
-                if c == "Y": return 24
-                if c == "M" or c == "MT": return 25
-                return 26 # Autres
-            
-            df_man["Chr_Num"] = df_man["Chromosome"].apply(sort_chrom)
-            df_man = df_man.sort_values("Chr_Num")
-            
-            # Création du Graphique
-            # On utilise une astuce couleur pour alterner les chromosomes comme un vrai Manhattan
-            df_man["Color_Group"] = df_man["Chr_Num"] % 2 
-            
-            fig_man = px.scatter(
-                df_man, 
-                x="Chromosome", 
-                y="CADD_phred",
-                color="Color_Group", # Alterne les couleurs (Bleu/Rouge par ex)
-                color_continuous_scale=["#3c4e68", "#5b8cbe"], # Nuances de gris/bleu pro
-                hover_data=["Gene_symbol", "Variant", "Pseudo", "ACMG_Class"],
-                size="CADD_phred", # Les points importants sont plus gros
-                size_max=15
-            )
-            
-            # Ligne de seuil CADD 20 (Pathogénicité probable)
-            fig_man.add_hline(y=20, line_dash="dash", line_color="red", annotation_text="Seuil CADD > 20")
-            
-            fig_man.update_layout(
-                title="Distribution Génomique des Scores CADD",
-                xaxis_title="Chromosomes",
-                yaxis_title="CADD Phred Score",
-                coloraxis_showscale=False, # Cache la barre de couleur technique
-                height=600,
-                xaxis=dict(type='category'), # Force l'ordre catégoriel trié
-                plot_bgcolor="white"
-            )
-            
-            st.plotly_chart(fig_man, use_container_width=True)
+            # 1. NETTOYAGE CRITIQUE : On retire les variants sans score CADD
+            # Cela évite le crash du paramètre 'size'
+            df_man["CADD_phred"] = pd.to_numeric(df_man["CADD_phred"], errors="coerce")
+            df_man = df_man.dropna(subset=["CADD_phred"])
+
+            if df_man.empty:
+                st.warning("Aucun variant avec un score CADD valide pour l'affichage.")
+            else:
+                # Nettoyage et Tri des Chromosomes
+                def sort_chrom(c):
+                    c = str(c).replace("chr", "").upper().strip()
+                    if c.isdigit(): return int(c)
+                    if c == "X": return 23
+                    if c == "Y": return 24
+                    if c == "M" or c == "MT": return 25
+                    return 26 # Autres
+                
+                df_man["Chr_Num"] = df_man["Chromosome"].apply(sort_chrom)
+                df_man = df_man.sort_values("Chr_Num")
+                
+                # Gestion des couleurs (Mode Discret pour la stabilité)
+                # On convertit en string pour forcer le mode discret
+                df_man["Color_Group"] = (df_man["Chr_Num"] % 2).astype(str)
+                
+                fig_man = px.scatter(
+                    df_man, 
+                    x="Chromosome", 
+                    y="CADD_phred",
+                    color="Color_Group", 
+                    # On utilise discrete_sequence car Color_Group est maintenant "0" ou "1"
+                    color_discrete_sequence=["#3c4e68", "#5b8cbe"], 
+                    hover_data={
+                        "Gene_symbol": True, 
+                        "Variant": True, 
+                        "Pseudo": True, 
+                        "ACMG_Class": True,
+                        "Color_Group": False, # On cache ceci du tooltip
+                        "Chr_Num": False
+                    },
+                    size="CADD_phred", 
+                    size_max=15
+                )
+                
+                # Ligne de seuil CADD 20
+                fig_man.add_hline(y=20, line_dash="dash", line_color="#d9534f", annotation_text="Seuil CADD > 20")
+                
+                fig_man.update_layout(
+                    title="Distribution Génomique des Scores CADD",
+                    xaxis_title="Chromosomes",
+                    yaxis_title="CADD Phred Score",
+                    showlegend=False, # Pas besoin de légende pour l'alternance de couleur
+                    height=600,
+                    xaxis=dict(type='category'), # Force l'ordre catégoriel trié
+                    plot_bgcolor="white"
+                )
+                
+                st.plotly_chart(fig_man, use_container_width=True)
             
         else:
             st.warning("Colonnes 'Chromosome' ou 'CADD_phred' manquantes.")
