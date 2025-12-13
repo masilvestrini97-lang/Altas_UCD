@@ -13,6 +13,7 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 from scipy.stats import hypergeom
+import plotly.io as pio # Nécessaire pour l'export
 
 # --- IMPORTS POUR VISUALISATION & RAPPORT ---
 import matplotlib.pyplot as plt
@@ -785,7 +786,7 @@ if st.session_state["analysis_done"]:
     
 # --- TAB 10: PATHOGENIC MATRIX (AMÉLIORÉ) ---
 # --- TAB 10: PATHOGENIC MATRIX (FINAL - PDF EXPORT) ---
-import plotly.io as pio # Nécessaire pour l'export
+
 
 with tabs[9]:
     st.subheader("🔥 Matrice 'OncoPrint' (ACMG + Type Mutation)")
