@@ -784,22 +784,24 @@ if st.session_state["analysis_done"]:
                     else: st.warning("Pas d'interactions.")
     
 # --- TAB 10: PATHOGENIC MATRIX (AMÉLIORÉ) ---
-# --- TAB 10: PATHOGENIC MATRIX (DUAL COLOR / SPLIT) ---
+# --- TAB 10: PATHOGENIC MATRIX (FINAL - PDF EXPORT) ---
+import plotly.io as pio # Nécessaire pour l'export
+
 with tabs[9]:
     st.subheader("🔥 Matrice 'OncoPrint' (ACMG + Type Mutation)")
-    st.info("Chaque carré est divisé en deux :\n- ◤ **Triangle Haut-Gauche** : Classification ACMG (Rouge/Orange)\n- ◢ **Triangle Bas-Droite** : Type de Mutation (Noir=Tronquant, Bleu=Missense, etc.)")
-    
+    st.info("Chaque carré est divisé en deux : Haut-Gauche (ACMG) / Bas-Droite (Type).")
+
     # 1. Filtrage P/LP
     df_patho = df_res[df_res["ACMG_Class"].isin(["Pathogenic", "Likely Pathogenic"])].copy()
-    
+
     if "Pseudo" in df_patho.columns and "Gene_symbol" in df_patho.columns and not df_patho.empty:
         
-        # --- A. PREPARATION DU TRI (Comme avant) ---
-        # On crée une matrice temporaire juste pour calculer l'ordre de tri
+        # --- A. PREPARATION DU TRI ---
+        # Scoring pour le tri
         df_patho["Severity_Score"] = df_patho["ACMG_Class"].map({"Pathogenic": 2, "Likely Pathogenic": 1})
         matrix_temp = df_patho.pivot_table(index="Gene_symbol", columns="Pseudo", values="Severity_Score", aggfunc='max', fill_value=0)
         
-        # Tri Gènes (Axe Y) : Fréquents en HAUT (Ordre Croissant car Plotly dessine de bas en haut)
+        # Tri Gènes (Axe Y) : Fréquents en HAUT (Ordre Croissant pour Plotly)
         gene_freq = (matrix_temp > 0).sum(axis=1)
         sorted_genes = gene_freq.sort_values(ascending=True).index.tolist()
         
@@ -807,137 +809,113 @@ with tabs[9]:
         pat_burden = (matrix_temp > 0).sum(axis=0)
         sorted_pats = pat_burden.sort_values(ascending=False).index.tolist()
         
-        # --- B. PREPARATION DES COULEURS ---
-        
-        # Fonction pour simplifier le type de mutation
+        # --- B. COULEURS & CATEGORIES ---
         def get_mutation_category(eff):
             e = str(eff).lower()
-            if any(x in e for x in ["stop", "frameshift", "nonsense", "splice_acceptor", "splice_donor"]):
-                return "Truncating" # Grave (Noir)
-            if "missense" in e:
-                return "Missense"   # (Bleu)
-            if "splice" in e:       # Splice region mais pas donor/acceptor
-                return "Splice"     # (Vert)
-            return "Other"          # (Gris)
+            if any(x in e for x in ["stop", "frameshift", "nonsense", "splice_acceptor", "splice_donor"]): return "Truncating"
+            if "missense" in e: return "Missense"
+            if "splice" in e: return "Splice"
+            return "Other"
 
         df_patho["Mut_Cat"] = df_patho["Variant_effect"].apply(get_mutation_category)
         
-        # Mappings Couleurs
         color_map_acmg = {"Pathogenic": "#d9534f", "Likely Pathogenic": "#f0ad4e"}
-        color_map_type = {
-            "Truncating": "#2c3e50", # Noir/Gris foncé (Stop, Frameshift)
-            "Missense": "#3498db",   # Bleu
-            "Splice": "#27ae60",     # Vert
-            "Other": "#95a5a6"       # Gris clair
-        }
+        color_map_type = {"Truncating": "#2c3e50", "Missense": "#3498db", "Splice": "#27ae60", "Other": "#95a5a6"}
         
-        # On ne garde que le variant le plus sévère par case pour l'affichage
-        # (Si un patient a 2 variants sur le même gène, on privilégie P sur LP, et Truncating sur Missense)
+        # Nettoyage doublons (garde le plus sévère)
         df_viz = df_patho.sort_values(["Severity_Score", "Mut_Cat"], ascending=False).drop_duplicates(subset=["Pseudo", "Gene_symbol"])
-        
-        # On filtre pour ne garder que ceux dans la liste triée (sécurité)
         df_viz = df_viz[df_viz["Pseudo"].isin(sorted_pats) & df_viz["Gene_symbol"].isin(sorted_genes)]
         
-        # --- C. CONSTRUCTION DU GRAPHIQUE (SCATTER PLOT) ---
+        # --- C. DIMENSIONS DYNAMIQUES (CRUCIAL POUR L'EXPORT) ---
+        # On calcule la taille nécessaire en pixels
+        # Largeur = (Nb Patients * 35px) + 200px de marge pour les noms de gènes à gauche
+        calc_width = max(800, len(sorted_pats) * 35 + 300) 
+        # Hauteur = (Nb Gènes * 35px) + 250px de marge pour les noms de patients en bas + titre
+        calc_height = max(600, len(sorted_genes) * 35 + 250)
         
-        # Hauteur dynamique
-        dyn_height = max(650, len(sorted_genes) * 35)
-        
+        # --- D. CONSTRUCTION GRAPHIQUE ---
         fig = go.Figure()
         
-        # TRACE 1 : Triangle Haut-Gauche (ACMG)
-        # symbol 'triangle-nw' = North-West
+        # Triangle Haut-Gauche (ACMG)
         fig.add_trace(go.Scatter(
-            x=df_viz["Pseudo"],
-            y=df_viz["Gene_symbol"],
-            mode='markers',
-            marker=dict(
-                symbol='triangle-nw',
-                size=24, # Taille ajustée pour former un carré
-                color=df_viz["ACMG_Class"].map(color_map_acmg),
-                line=dict(width=0) # Pas de bordure
-            ),
-            name="ACMG Status",
-            hoverinfo='skip' # On gère le hover dans une trace invisible ou combinée
+            x=df_viz["Pseudo"], y=df_viz["Gene_symbol"], mode='markers',
+            marker=dict(symbol='triangle-nw', size=24, color=df_viz["ACMG_Class"].map(color_map_acmg), line=dict(width=0)),
+            name="ACMG", hoverinfo='skip'
         ))
         
-        # TRACE 2 : Triangle Bas-Droite (Type Mutation)
-        # symbol 'triangle-se' = South-East
+        # Triangle Bas-Droite (Type)
         fig.add_trace(go.Scatter(
-            x=df_viz["Pseudo"],
-            y=df_viz["Gene_symbol"],
-            mode='markers',
-            marker=dict(
-                symbol='triangle-se',
-                size=24,
-                color=df_viz["Mut_Cat"].map(color_map_type),
-                line=dict(width=0)
-            ),
-            name="Mutation Type",
-            hovertemplate='<b>Patient:</b> %{x}<br><b>Gène:</b> %{y}<br><b>Type:</b> %{text}<extra></extra>',
+            x=df_viz["Pseudo"], y=df_viz["Gene_symbol"], mode='markers',
+            marker=dict(symbol='triangle-se', size=24, color=df_viz["Mut_Cat"].map(color_map_type), line=dict(width=0)),
+            name="Type", hovertemplate='<b>Patient:</b> %{x}<br><b>Gène:</b> %{y}<br><b>Type:</b> %{text}<extra></extra>',
             text=df_viz["Mut_Cat"] + " (" + df_viz["Variant"] + ")"
         ))
 
-        # --- D. AJOUT DE LA LEGENDE MANUELLE ---
-        # On ajoute des points invisibles ("ghost traces") pour créer une belle légende
-        
-        # Légende ACMG
-        for label, color in color_map_acmg.items():
-            fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', 
-                                     marker=dict(symbol='triangle-nw', size=15, color=color), name=f"ACMG: {label}"))
-            
-        # Légende Type
-        for label, color in color_map_type.items():
-            fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', 
-                                     marker=dict(symbol='triangle-se', size=15, color=color), name=f"Type: {label}"))
+        # Légendes fantômes
+        for l, c in color_map_acmg.items(): fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(symbol='triangle-nw', size=15, color=c), name=f"ACMG: {l}"))
+        for l, c in color_map_type.items(): fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(symbol='triangle-se', size=15, color=c), name=f"Type: {l}"))
 
-        # --- E. LAYOUT & GRILLE ---
+        # --- E. LAYOUT ---
         fig.update_layout(
-            title_text=f"OncoPrint Hybride ({len(df_patho)} variants)",
-            title_x=0.5,
-            height=dyn_height,
+            title=dict(text=f"OncoPrint ({len(df_patho)} variants)", x=0.5),
+            width=calc_width,  # On force la largeur calculée
+            height=calc_height, # On force la hauteur calculée
             xaxis=dict(
-                title="Patients (Triés par charge)",
-                tickangle=-45,
-                categoryorder='array',
-                categoryarray=sorted_pats, # Force l'ordre trié
-                showgrid=True,
-                gridcolor='#eeeeee',
-                zeroline=False
+                title="Patients", tickangle=-45, 
+                categoryorder='array', categoryarray=sorted_pats,
+                showgrid=True, gridcolor='#eeeeee', zeroline=False
             ),
             yaxis=dict(
-                title=None,
-                categoryorder='array',
-                categoryarray=sorted_genes, # Force l'ordre trié (Haut fréquence en haut)
-                tickfont=dict(size=14),
-                showgrid=True,
-                gridcolor='#eeeeee',
-                zeroline=False
+                title=None, tickfont=dict(size=14),
+                categoryorder='array', categoryarray=sorted_genes,
+                showgrid=True, gridcolor='#eeeeee', zeroline=False
             ),
-            plot_bgcolor='white', # Fond blanc
-            legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center")
+            plot_bgcolor='white',
+            legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center"),
+            # Marges automatiques pour éviter que les labels ne soient coupés
+            margin=dict(l=150, r=50, t=100, b=150) 
         )
 
-        # Configuration Export SVG/PDF
+        # Affichage interactif
+        # On corrige aussi le bouton "Appareil photo" natif
         config = {
             'toImageButtonOptions': {
-                'format': 'svg',
-                'filename': f'OncoPrint_Split_{datetime.now().strftime("%Y%m%d")}',
-                'height': dyn_height,
-                'width': max(1000, len(sorted_pats)*40),
-                'scale': 1
-            },
-            'displayModeBar': True
+                'format': 'svg', 
+                'filename': 'OncoPrint_Export',
+                'height': calc_height, 
+                'width': calc_width,
+                'scale': 1.5 # Augmente la qualité
+            }
         }
-        
         st.plotly_chart(fig, use_container_width=True, config=config)
-        st.caption("ℹ️ Le graphique combine deux informations par case. Utilisez l'export SVG (appareil photo) pour une qualité parfaite.")
-        
+
+        # --- F. BOUTON EXPORT PDF DÉDIÉ ---
+        c_exp1, c_exp2 = st.columns([1, 4])
+        with c_exp1:
+            st.write("###")
+            try:
+                # Tentative de génération du PDF via Python (nécessite kaleido)
+                # On utilise les dimensions calculées pour garantir que tout rentre
+                pdf_bytes = pio.to_image(fig, format="pdf", width=calc_width, height=calc_height, scale=1)
+                
+                st.download_button(
+                    label="📄 Télécharger en PDF",
+                    data=pdf_bytes,
+                    file_name=f"OncoPrint_Full_{datetime.now().strftime('%Y%m%d')}.pdf",
+                    mime="application/pdf",
+                    type="primary"
+                )
+            except ImportError:
+                st.error("⚠️ Module 'kaleido' manquant.")
+                st.info("Pour activer l'export PDF, installez-le : `pip install -U kaleido`")
+            except Exception as e:
+                st.error(f"Erreur Export : {e}")
+                
         with st.expander("Voir les données brutes"):
-            st.dataframe(df_viz[["Pseudo", "Gene_symbol", "Variant", "ACMG_Class", "Mut_Cat", "Severity_Score"]])
+            st.dataframe(df_viz)
 
     else:
-        st.warning("Aucun variant Pathogenic ou Likely Pathogenic trouvé.")
+        st.warning("Aucun variant pertinent trouvé.")
 # --- CORRECTION ICI ---
 if not submitted:
     st.info("👈 Chargez fichier + Lancer.")
