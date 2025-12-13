@@ -783,218 +783,90 @@ if st.session_state["analysis_done"]:
                         agraph(nodes=nodes, edges=edges, config=Config(width=700, height=500, directed=False, physics=True))
                     else: st.warning("Pas d'interactions.")
     
-    # --- TAB 9: EVOLUTION CLONALE (AVEC RAPPORT PDF GLOBAL) ---
-    with tabs[8]:
-        st.subheader("🧬 Analyse de l'Architecture Clonale")
+# --- TAB 10: PATHOGENIC MATRIX (AMÉLIORÉ) ---
+with tabs[9]:
+    st.subheader("🔥 Matrice Pathogènes (Triée & Interactive)")
+    st.info("Visualisation haute définition. Rouge = Pathogenic, Orange = Likely Pathogenic. Les gènes sont triés par fréquence.")
+    
+    # 1. Filtrer et Préparer les données
+    # On garde P et LP
+    df_patho = df_res[df_res["ACMG_Class"].isin(["Pathogenic", "Likely Pathogenic"])].copy()
+    
+    if "Pseudo" in df_patho.columns and "Gene_symbol" in df_patho.columns and not df_patho.empty:
         
-        # Vérification des colonnes nécessaires
-        if "Pseudo" in df_res.columns and "Allelic_ratio" in df_res.columns:
-            
-            # --- SECTION 1 : VISUALISATION INTERACTIVE (Reste inchangée) ---
-            c_sel1, c_sel2 = st.columns([1, 3])
-            with c_sel1:
-                patients_list = sorted(df_res["Pseudo"].astype(str).unique())
-                sel_pat_clon = st.selectbox("Sélectionner un Patient :", patients_list)
-            
-            n_clusters_def = 3 
-            
-            if sel_pat_clon:
-                df_clon = df_res[df_res["Pseudo"] == sel_pat_clon].copy()
-                df_clon = df_clon.dropna(subset=["Allelic_ratio"])
-                
-                col_c1, col_c2 = st.columns([1, 3])
-                with col_c1:
-                    n_clusters = st.slider("Nombre de clones", 1, 5, n_clusters_def, key="slider_clon_indiv")
-                    st.info(f"Variants : {len(df_clon)}")
-                
-                with col_c2:
-                    if len(df_clon) < 3:
-                        st.warning("Pas assez de variants (<3).")
-                    else:
-                        try:
-                            # K-Means
-                            X = df_clon[["Allelic_ratio"]].values
-                            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-                            df_clon["Cluster_ID"] = kmeans.fit_predict(X)
-                            
-                            centroids = df_clon.groupby("Cluster_ID")["Allelic_ratio"].mean().sort_values().index
-                            cluster_map = {old_id: f"C{i+1}" for i, old_id in enumerate(centroids)}
-                            df_clon["Cluster_Label"] = df_clon["Cluster_ID"].map(cluster_map)
-                            
-                            # Plotly (Interactif)
-                            fig_clon = px.histogram(
-                                df_clon, x="Allelic_ratio", color="Cluster_Label", 
-                                nbins=30, marginal="rug", opacity=0.7, barmode="overlay",
-                                title=f"Architecture - {sel_pat_clon}",
-                                color_discrete_sequence=px.colors.qualitative.G10
-                            )
-                            fig_clon.update_layout(xaxis_range=[0, 1.05])
-                            st.plotly_chart(fig_clon, use_container_width=True)
-                            
-                        except Exception as e: st.error(f"Erreur : {e}")
-
-            # --- SECTION 2 : EXPORT PDF GLOBAL ---
-            st.markdown("---")
-            st.subheader("📄 Rapport PDF Global")
-            st.info("Génère un PDF unique avec une page par patient (Graphique + Tableau).")
-            
-            if st.button("Générer le PDF Global"):
-                
-                class PDFReport(FPDF):
-                    def header(self):
-                        self.set_font('Arial', 'B', 10)
-                        self.cell(0, 10, 'Atlas Clonal Analysis Report', 0, 1, 'R')
-                    def footer(self):
-                        self.set_y(-15)
-                        self.set_font('Arial', 'I', 8)
-                        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
-
-                pdf = PDFReport()
-                progress_bar = st.progress(0)
-                
-                # Création d'un dossier temporaire pour les images
-                with tempfile.TemporaryDirectory() as tmp_dir:
-                    total_pats = len(patients_list)
-                    
-                    for idx, pat in enumerate(patients_list):
-                        progress_bar.progress((idx + 1) / total_pats)
-                        
-                        # Filtrage et Calcul
-                        d_temp = df_res[df_res["Pseudo"] == pat].copy().dropna(subset=["Allelic_ratio"])
-                        
-                        if len(d_temp) >= 3:
-                            try:
-                                # 1. Calculs Clusters
-                                km = KMeans(n_clusters=3, random_state=42, n_init=10) # Force 3 clusters pour standardisation
-                                d_temp["Cluster_ID"] = km.fit_predict(d_temp[["Allelic_ratio"]].values)
-                                cents = d_temp.groupby("Cluster_ID")["Allelic_ratio"].mean().sort_values().index
-                                cmap = {oid: f"C{i+1}" for i, oid in enumerate(cents)}
-                                d_temp["Cluster_Label"] = d_temp["Cluster_ID"].map(cmap)
-                                
-                                # 2. Génération Graphique Matplotlib (Statique pour PDF)
-                                plt.figure(figsize=(10, 5))
-                                sns.histplot(data=d_temp, x="Allelic_ratio", hue="Cluster_Label", 
-                                             bins=30, kde=True, palette="viridis", element="step")
-                                plt.title(f"Patient: {pat} - Architecture Clonale")
-                                plt.xlim(0, 1.05)
-                                plt.xlabel("VAF")
-                                plt.ylabel("Count")
-                                
-                                # Sauvegarde image
-                                img_path = os.path.join(tmp_dir, f"{clean_text(pat)}.png")
-                                plt.savefig(img_path, dpi=100, bbox_inches='tight')
-                                plt.close()
-
-                                # 3. Ajout Page PDF
-                                pdf.add_page()
-                                pdf.set_font("Arial", 'B', 16)
-                                pdf.cell(0, 10, f"Patient : {pat}", 0, 1, 'L')
-                                
-                                # Image
-                                pdf.image(img_path, x=10, y=30, w=190)
-                                
-                                # Tableau
-                                pdf.set_y(130)
-                                pdf.set_font("Arial", 'B', 10)
-                                pdf.cell(0, 10, "Tableau des Variants (Top 15 par VAF)", 0, 1)
-                                
-                                # En-têtes tableau
-                                cols = [("Gene", 25), ("Variant", 50), ("VAF", 20), ("Clone", 20), ("ACMG", 40)]
-                                pdf.set_fill_color(220, 220, 220)
-                                for c_name, c_w in cols:
-                                    pdf.cell(c_w, 8, c_name, 1, 0, 'C', 1)
-                                pdf.ln()
-                                
-                                # Données tableau (Trié par Clone puis VAF)
-                                pdf.set_font("Arial", '', 9)
-                                d_table = d_temp.sort_values(["Cluster_Label", "Allelic_ratio"], ascending=[True, False]).head(15)
-                                
-                                for _, row in d_table.iterrows():
-                                    gene = str(row.get("Gene_symbol", ""))[:10]
-                                    var = str(row.get("Variant", ""))[:25]
-                                    vaf = f"{row.get('Allelic_ratio', 0):.2f}"
-                                    clone = str(row.get("Cluster_Label", ""))
-                                    acmg = str(row.get("ACMG_Class", ""))[:20]
-                                    
-                                    pdf.cell(25, 7, gene, 1)
-                                    pdf.cell(50, 7, var, 1)
-                                    pdf.cell(20, 7, vaf, 1, 0, 'C')
-                                    pdf.cell(20, 7, clone, 1, 0, 'C')
-                                    pdf.cell(40, 7, acmg, 1)
-                                    pdf.ln()
-                                    
-                            except Exception as e:
-                                st.warning(f"Skipped {pat}: {e}")
-                
-                # Téléchargement
-                pdf_bytes = pdf.output(dest='S').encode('latin-1', 'ignore')
-                st.download_button(
-                    label="📥 Télécharger le Rapport PDF",
-                    data=pdf_bytes,
-                    file_name=f"Rapport_Clonal_Global_{datetime.now().strftime('%Y%m%d')}.pdf",
-                    mime="application/pdf",
-                    type="primary"
-                )
-                progress_bar.empty()
-
-        else:
-            st.warning("Données insuffisantes (Pseudo/VAF manquants).")
-
-# Mettez à jour la liste des onglets pour inclure le nouveau.
-# tabs = st.tabs(["📋 Tableau", "🔍 Inspecteur", "🧩 Corrélation", "📊 Spectre", "📍 Lollipops", "📈 QC", "🧬 Pathways", "🕸️ PPI", "🧬 Évolution Clonale", "🔥 Patho Matrix"]) 
-# Cette ligne est conceptuelle, la modification est faite en remplaçant la ligne existante.
-# --- TAB 10: PATHOGENIC MATRIX ---
-    with tabs[9]:
-        st.subheader("🔥 Matrice Pathogènes/Likely Pathogènes")
-        st.info("Visualisation de la présence des variants Pathogenic et Likely Pathogenic (ACMG) chez chaque patient, par gène.")
+        # 2. Création d'un score numérique pour la couleur
+        # Pathogenic = 2, Likely Pathogenic = 1
+        df_patho["Severity_Score"] = df_patho["ACMG_Class"].map({"Pathogenic": 2, "Likely Pathogenic": 1})
         
-        # 1. Filtrer uniquement les variants P et LP
-        df_patho = df_res[df_res["ACMG_Class"].isin(["Pathogenic", "Likely Pathogenic"])].copy()
+        # Pivot Table : On prend le MAX. 
+        # Si un patient a un variant P et un LP sur le même gène, c'est le P (2) qui l'emporte.
+        matrix_score = df_patho.pivot_table(
+            index="Gene_symbol", 
+            columns="Pseudo", 
+            values="Severity_Score", 
+            aggfunc='max', 
+            fill_value=0
+        )
         
-        if "Pseudo" in df_patho.columns and "Gene_symbol" in df_patho.columns and not df_patho.empty:
-            # 2. Créer la matrice Patient x Gène
-            matrix_patho = df_patho.pivot_table(
-                index="Gene_symbol", 
-                columns="Pseudo", 
-                aggfunc='size', 
-                fill_value=0
-            )
-            
-            # Binarisation
-            matrix_patho[matrix_patho > 0] = 1 
+        # 3. Tri Intelligent (Genes par fréquence décroissante, Patients par charge décroissante)
+        # Fréquence par gène (somme des valeurs > 0)
+        gene_freq = (matrix_score > 0).sum(axis=1)
+        sorted_genes = gene_freq.sort_values(ascending=False).index
+        
+        # Charge mutationnelle par patient (facultatif, mais rend le graph plus beau "en cascade")
+        pat_burden = (matrix_score > 0).sum(axis=0)
+        sorted_pats = pat_burden.sort_values(ascending=False).index
+        
+        # Réorganiser la matrice
+        matrix_sorted = matrix_score.loc[sorted_genes, sorted_pats]
+        
+        # 4. Visualisation Plotly (Définition parfaite + Couleurs discrètes)
+        # Définition de l'échelle de couleur discrète
+        # 0 = Blanc, 1 = Orange (LP), 2 = Rouge (P)
+        colorscale = [
+            [0.0, "white"],  # 0
+            [0.33, "white"],
+            [0.33, "#f0ad4e"], # 1: Likely Pathogenic (Orange ACMG)
+            [0.66, "#f0ad4e"],
+            [0.66, "#d9534f"], # 2: Pathogenic (Rouge ACMG)
+            [1.0, "#d9534f"]
+        ]
+        
+        # Hauteur dynamique : augmente si beaucoup de gènes pour garder la lisibilité
+        dyn_height = max(600, len(matrix_sorted) * 30)
+        
+        fig = go.Figure(data=go.Heatmap(
+            z=matrix_sorted.values,
+            x=matrix_sorted.columns,
+            y=matrix_sorted.index,
+            colorscale=colorscale,
+            zmin=0, zmax=2,
+            showscale=False, # On cache la barre de couleur continue car c'est discret
+            xgap=1, ygap=1,  # Petites lignes blanches entre les cases
+            hovertemplate='Patient: %{x}<br>Gène: %{y}<br>Statut: %{text}<extra></extra>',
+            text=[[ "Pathogenic" if v==2 else ("Likely Pathogenic" if v==1 else "") for v in row ] for row in matrix_sorted.values]
+        ))
 
-            # 3. Clustering
-            try:
-                sns.set_context("talk")
-                plt.figure(figsize=(matrix_patho.shape[1] * 0.5 + 2, matrix_patho.shape[0] * 0.3 + 2))
-                
-                g = sns.clustermap(
-                    matrix_patho, 
-                    cmap="Reds", 
-                    linewidths=0.5, 
-                    linecolor='lightgray', 
-                    col_cluster=True, 
-                    row_cluster=True,
-                    yticklabels=True, 
-                    xticklabels=True,
-                    method='ward'
-                )
-                
-                g.ax_heatmap.set_ylabel('Gène', fontsize=12)
-                g.ax_heatmap.set_xlabel('Patient', fontsize=12)
-                plt.suptitle('Matrice Gène-Patient (ACMG P/LP)', y=1.05)
-                
-                st.pyplot(g.fig)
-                
-                with st.expander("Voir la Matrice de Données"):
-                    st.dataframe(matrix_patho)
-                    
-            except Exception as e:
-                st.warning(f"Impossible de générer le clustering (besoin de >1 gène/patient) : {e}")
-                st.plotly_chart(px.imshow(matrix_patho, text_auto=True, color_continuous_scale="Reds", height=700), use_container_width=True)
+        # Ajout d'une légende "Manuelle" (Astuce Plotly)
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(size=10, color='#d9534f', symbol='square'), name='Pathogenic'))
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(size=10, color='#f0ad4e', symbol='square'), name='Likely Pathogenic'))
+        
+        fig.update_layout(
+            title="Matrice ACMG (P/LP)",
+            xaxis_title="Patients",
+            yaxis_title="Gènes",
+            height=dyn_height,
+            yaxis=dict(autorange="reversed"), # Pour avoir le top fréquent en haut
+            legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center")
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        with st.expander("Voir les données brutes"):
+            st.dataframe(matrix_sorted)
 
-        else:
-            st.warning("Aucun variant classé Pathogenic ou Likely Pathogenic trouvé avec les filtres actuels.")
+    else:
+        st.warning("Aucun variant Pathogenic ou Likely Pathogenic trouvé pour générer la matrice.")
 
 # --- CORRECTION ICI ---
 if not submitted:
