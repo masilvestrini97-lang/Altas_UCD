@@ -943,67 +943,59 @@ if st.session_state["analysis_done"]:
 # Mettez à jour la liste des onglets pour inclure le nouveau.
 # tabs = st.tabs(["📋 Tableau", "🔍 Inspecteur", "🧩 Corrélation", "📊 Spectre", "📍 Lollipops", "📈 QC", "🧬 Pathways", "🕸️ PPI", "🧬 Évolution Clonale", "🔥 Patho Matrix"]) 
 # Cette ligne est conceptuelle, la modification est faite en remplaçant la ligne existante.
-
 # --- TAB 10: PATHOGENIC MATRIX ---
-with tabs[9]:
-    st.subheader("🔥 Matrice Pathogènes/Likely Pathogènes")
-    st.info("Visualisation de la présence des variants Pathogenic et Likely Pathogenic (ACMG) chez chaque patient, par gène.")
-    
-    # 1. Filtrer uniquement les variants P et LP
-    df_patho = df_res[df_res["ACMG_Class"].isin(["Pathogenic", "Likely Pathogenic"])].copy()
-    
-    if "Pseudo" in df_patho.columns and "Gene_symbol" in df_patho.columns and not df_patho.empty:
-        # 2. Créer la matrice Patient x Gène
-        # L'agrégation compte le nombre de variants P/LP pour chaque paire (Patient, Gène)
-        matrix_patho = df_patho.pivot_table(
-            index="Gene_symbol", 
-            columns="Pseudo", 
-            aggfunc='size', 
-            fill_value=0
-        )
+    with tabs[9]:
+        st.subheader("🔥 Matrice Pathogènes/Likely Pathogènes")
+        st.info("Visualisation de la présence des variants Pathogenic et Likely Pathogenic (ACMG) chez chaque patient, par gène.")
         
-        # S'assurer que les valeurs sont binaires (0 ou 1+) pour l'affichage OncoPrint/Heatmap
-        matrix_patho[matrix_patho > 0] = 1 
-
-        # 3. Clustering (facultatif mais recommandé pour une meilleure lisibilité)
-        # Permet de regrouper les patients et les gènes similaires.
-        try:
-            sns.set_context("talk")
-            plt.figure(figsize=(matrix_patho.shape[1] * 0.5 + 2, matrix_patho.shape[0] * 0.3 + 2))
-            
-            # Utilisation de Seaborn pour une heatmap avec clustering
-            g = sns.clustermap(
-                matrix_patho, 
-                cmap="Reds", 
-                linewidths=0.5, 
-                linecolor='lightgray', 
-                col_cluster=True, 
-                row_cluster=True,
-                yticklabels=True, 
-                xticklabels=True,
-                method='ward' # Méthode de clustering
+        # 1. Filtrer uniquement les variants P et LP
+        df_patho = df_res[df_res["ACMG_Class"].isin(["Pathogenic", "Likely Pathogenic"])].copy()
+        
+        if "Pseudo" in df_patho.columns and "Gene_symbol" in df_patho.columns and not df_patho.empty:
+            # 2. Créer la matrice Patient x Gène
+            matrix_patho = df_patho.pivot_table(
+                index="Gene_symbol", 
+                columns="Pseudo", 
+                aggfunc='size', 
+                fill_value=0
             )
             
-            # Renommer les labels et ajuster
-            g.ax_heatmap.set_ylabel('Gène', fontsize=12)
-            g.ax_heatmap.set_xlabel('Patient', fontsize=12)
-            plt.suptitle('Matrice Gène-Patient (ACMG P/LP)', y=1.05)
-            
-            st.pyplot(g.fig)
-            
+            # Binarisation
+            matrix_patho[matrix_patho > 0] = 1 
 
-            # Affichage de la matrice brute (facultatif)
-            with st.expander("Voir la Matrice de Données"):
-                st.dataframe(matrix_patho)
+            # 3. Clustering
+            try:
+                sns.set_context("talk")
+                plt.figure(figsize=(matrix_patho.shape[1] * 0.5 + 2, matrix_patho.shape[0] * 0.3 + 2))
                 
-        except Exception as e:
-            st.warning(f"Impossible de générer la Matrice : {e}. Assurez-vous d'avoir au moins 2 gènes et 2 patients pour le clustering.")
-            # Affichage basique si le clustermap échoue
-            st.plotly_chart(px.imshow(matrix_patho, text_auto=True, color_continuous_scale="Reds", height=700), use_container_width=True)
+                g = sns.clustermap(
+                    matrix_patho, 
+                    cmap="Reds", 
+                    linewidths=0.5, 
+                    linecolor='lightgray', 
+                    col_cluster=True, 
+                    row_cluster=True,
+                    yticklabels=True, 
+                    xticklabels=True,
+                    method='ward'
+                )
+                
+                g.ax_heatmap.set_ylabel('Gène', fontsize=12)
+                g.ax_heatmap.set_xlabel('Patient', fontsize=12)
+                plt.suptitle('Matrice Gène-Patient (ACMG P/LP)', y=1.05)
+                
+                st.pyplot(g.fig)
+                
+                with st.expander("Voir la Matrice de Données"):
+                    st.dataframe(matrix_patho)
+                    
+            except Exception as e:
+                st.warning(f"Impossible de générer le clustering (besoin de >1 gène/patient) : {e}")
+                st.plotly_chart(px.imshow(matrix_patho, text_auto=True, color_continuous_scale="Reds", height=700), use_container_width=True)
 
-    else:
-        st.warning("Aucun variant classé Pathogenic ou Likely Pathogenic trouvé avec les filtres actuels.")
+        else:
+            st.warning("Aucun variant classé Pathogenic ou Likely Pathogenic trouvé avec les filtres actuels.")
 
-
-elif not submitted:
+# --- CORRECTION ICI ---
+if not submitted:
     st.info("👈 Chargez fichier + Lancer.")
