@@ -784,22 +784,20 @@ if st.session_state["analysis_done"]:
                     else: st.warning("Pas d'interactions.")
     
 # --- TAB 10: PATHOGENIC MATRIX (AMÉLIORÉ) ---
+# --- TAB 10: PATHOGENIC MATRIX (FINAL) ---
 with tabs[9]:
-    st.subheader("🔥 Matrice Pathogènes (Triée & Interactive)")
-    st.info("Visualisation haute définition. Rouge = Pathogenic, Orange = Likely Pathogenic. Les gènes sont triés par fréquence.")
+    st.subheader("🔥 Matrice Pathogènes (High-Def & Waterfall)")
+    st.info("Rouge = Pathogenic, Orange = Likely Pathogenic. Gènes triés par fréquence (Haut-Bas), Patients triés par charge (Gauche-Droite).")
     
-    # 1. Filtrer et Préparer les données
-    # On garde P et LP
+    # 1. Filtrage strict P/LP
     df_patho = df_res[df_res["ACMG_Class"].isin(["Pathogenic", "Likely Pathogenic"])].copy()
     
     if "Pseudo" in df_patho.columns and "Gene_symbol" in df_patho.columns and not df_patho.empty:
         
-        # 2. Création d'un score numérique pour la couleur
-        # Pathogenic = 2, Likely Pathogenic = 1
+        # 2. Scoring (P=2, LP=1)
         df_patho["Severity_Score"] = df_patho["ACMG_Class"].map({"Pathogenic": 2, "Likely Pathogenic": 1})
         
-        # Pivot Table : On prend le MAX. 
-        # Si un patient a un variant P et un LP sur le même gène, c'est le P (2) qui l'emporte.
+        # Pivot
         matrix_score = df_patho.pivot_table(
             index="Gene_symbol", 
             columns="Pseudo", 
@@ -808,32 +806,33 @@ with tabs[9]:
             fill_value=0
         )
         
-        # 3. Tri Intelligent (Genes par fréquence décroissante, Patients par charge décroissante)
-        # Fréquence par gène (somme des valeurs > 0)
+        # 3. Double Tri (Waterfall Sort)
+        # A. Tri des Gènes (Lignes) : Les plus fréquents en haut
         gene_freq = (matrix_score > 0).sum(axis=1)
         sorted_genes = gene_freq.sort_values(ascending=False).index
         
-        # Charge mutationnelle par patient (facultatif, mais rend le graph plus beau "en cascade")
+        # B. Tri des Patients (Colonnes) : Ceux avec le plus de variants à gauche
+        # Si égalité, on peut trier par nom, mais ici on privilégie la charge mutationnelle (burden)
         pat_burden = (matrix_score > 0).sum(axis=0)
+        # On trie par charge décroissante
         sorted_pats = pat_burden.sort_values(ascending=False).index
         
-        # Réorganiser la matrice
+        # Réorganisation de la matrice
         matrix_sorted = matrix_score.loc[sorted_genes, sorted_pats]
         
-        # 4. Visualisation Plotly (Définition parfaite + Couleurs discrètes)
-        # Définition de l'échelle de couleur discrète
-        # 0 = Blanc, 1 = Orange (LP), 2 = Rouge (P)
+        # 4. Configuration Visuelle
+        # Palette: 0=Transparent/Gris, 1=Orange, 2=Rouge
         colorscale = [
-            [0.0, "white"],  # 0
-            [0.33, "white"],
-            [0.33, "#f0ad4e"], # 1: Likely Pathogenic (Orange ACMG)
+            [0.0, "#f4f4f4"], # Gris très clair pour les cases vides (au lieu de blanc pour voir la grille)
+            [0.33, "#f4f4f4"],
+            [0.33, "#f0ad4e"], # Likely Pathogenic
             [0.66, "#f0ad4e"],
-            [0.66, "#d9534f"], # 2: Pathogenic (Rouge ACMG)
+            [0.66, "#d9534f"], # Pathogenic
             [1.0, "#d9534f"]
         ]
         
-        # Hauteur dynamique : augmente si beaucoup de gènes pour garder la lisibilité
-        dyn_height = max(600, len(matrix_sorted) * 30)
+        # Calcul hauteur dynamique
+        dyn_height = max(600, len(matrix_sorted) * 35) # Un peu plus d'espace par ligne
         
         fig = go.Figure(data=go.Heatmap(
             z=matrix_sorted.values,
@@ -841,33 +840,52 @@ with tabs[9]:
             y=matrix_sorted.index,
             colorscale=colorscale,
             zmin=0, zmax=2,
-            showscale=False, # On cache la barre de couleur continue car c'est discret
-            xgap=1, ygap=1,  # Petites lignes blanches entre les cases
-            hovertemplate='Patient: %{x}<br>Gène: %{y}<br>Statut: %{text}<extra></extra>',
-            text=[[ "Pathogenic" if v==2 else ("Likely Pathogenic" if v==1 else "") for v in row ] for row in matrix_sorted.values]
+            showscale=False,
+            # Quadrillage :
+            xgap=3, # Espace vertical (blanc) entre les colonnes
+            ygap=3, # Espace horizontal (blanc) entre les lignes
+            hovertemplate='<b>Patient:</b> %{x}<br><b>Gène:</b> %{y}<br><b>Statut:</b> %{text}<extra></extra>',
+            text=[[ "Pathogenic" if v==2 else ("Likely Pathogenic" if v==1 else "Absent") for v in row ] for row in matrix_sorted.values]
         ))
 
-        # Ajout d'une légende "Manuelle" (Astuce Plotly)
-        fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(size=10, color='#d9534f', symbol='square'), name='Pathogenic'))
-        fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(size=10, color='#f0ad4e', symbol='square'), name='Likely Pathogenic'))
+        # Légende artificielle
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(size=12, color='#d9534f', symbol='square'), name='Pathogenic'))
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(size=12, color='#f0ad4e', symbol='square'), name='Likely Pathogenic'))
         
+        # Layout propre
         fig.update_layout(
-            title="Matrice ACMG (P/LP)",
-            xaxis_title="Patients",
-            yaxis_title="Gènes",
+            title_text=f"Matrice de Variants ({len(df_patho)} variants, {len(matrix_sorted.columns)} patients)",
+            title_x=0.5,
+            xaxis_title="Patients (Triés par charge décroissante)",
+            yaxis_title=None,
             height=dyn_height,
-            yaxis=dict(autorange="reversed"), # Pour avoir le top fréquent en haut
+            plot_bgcolor='white', # Fond blanc derrière les gaps crée l'effet de grille
+            yaxis=dict(autorange="reversed", tickfont=dict(size=14)), # Gros texte pour les gènes
+            xaxis=dict(tickangle=-45, tickfont=dict(size=10)),
             legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center")
         )
         
-        st.plotly_chart(fig, use_container_width=True)
+        # 5. Configuration de l'Export (SVG/PDF)
+        # Cela modifie le bouton "Appareil photo" dans la barre d'outils du graph
+        config = {
+            'toImageButtonOptions': {
+                'format': 'svg', # SVG est vectoriel (comme PDF), parfait pour Illustrator/Inkscape
+                'filename': f'OncoPrint_Export_{datetime.now().strftime("%Y%m%d")}',
+                'height': dyn_height,
+                'width': max(1000, len(matrix_sorted.columns)*40), # Largeur adaptative pour l'export
+                'scale': 1 # Echelle
+            },
+            'displayModeBar': True
+        }
+        
+        st.plotly_chart(fig, use_container_width=True, config=config)
+        st.caption("ℹ️ Pour télécharger en haute définition : passez la souris sur le graphique et cliquez sur l'icône **appareil photo** (Download plot as png/svg).")
         
         with st.expander("Voir les données brutes"):
             st.dataframe(matrix_sorted)
 
     else:
-        st.warning("Aucun variant Pathogenic ou Likely Pathogenic trouvé pour générer la matrice.")
-
+        st.warning("Aucun variant Pathogenic ou Likely Pathogenic trouvé.")
 # --- CORRECTION ICI ---
 if not submitted:
     st.info("👈 Chargez fichier + Lancer.")
