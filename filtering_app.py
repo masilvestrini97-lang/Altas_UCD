@@ -403,7 +403,7 @@ if "analysis_done" not in st.session_state:
     st.session_state["logs"] = []
 
 # ==========================================================
-# PARTIE SIDEBAR - CORRIGÉE POUR LE JSON ET LES FILTRES
+# PARTIE SIDEBAR
 # ==========================================================
 
 with st.sidebar:
@@ -424,17 +424,10 @@ with st.sidebar:
             if "Clinvar_significance" in df_raw.columns: 
                 c_opts = sorted(df_raw["Clinvar_significance"].fillna("Non Renseigné").unique())
 
-            # --- CORRECTION 1 : INITIALISATION "TOUT COCHÉ PAR DÉFAUT" ---
-            # Si le state n'existe pas, on le met à TOUTES les options.
-            # Si le state existe, on nettoie pour enlever les options qui n'existent pas dans ce nouveau fichier
-            # (ce qui évite les erreurs de clé invalide quand on change de fichier CSV)
-
             if "sel_var" not in st.session_state:
                 st.session_state["sel_var"] = v_opts
             else:
-                # On garde seulement ce qui est valide dans le fichier actuel
                 st.session_state["sel_var"] = [x for x in st.session_state["sel_var"] if x in v_opts]
-                # Si la liste est vide après nettoyage, on re-sélectionne tout (sécurité)
                 if not st.session_state["sel_var"]: st.session_state["sel_var"] = v_opts
 
             if "sel_put" not in st.session_state:
@@ -457,13 +450,10 @@ with st.sidebar:
     
     if uploaded_config is not None:
         try:
-            # CORRECTION 2 : APPLICATION FIABLE DU JSON
             if st.button("🔄 APPLIQUER LA CONFIGURATION"):
                 data = json.load(uploaded_config)
                 
-                # On met à jour le session_state DIRECTEMENT
                 for key, value in data.items():
-                    # Pour les listes, on vérifie que les valeurs existent dans le fichier actuel
                     if key == "sel_var" and isinstance(value, list):
                         valid_vals = [x for x in value if x in v_opts]
                         st.session_state[key] = valid_vals
@@ -477,7 +467,7 @@ with st.sidebar:
                         st.session_state[key] = value
                 
                 st.success("Configuration chargée !")
-                st.rerun() # INDISPENSABLE : Recharge l'interface pour afficher les nouvelles valeurs
+                st.rerun()
                 
         except Exception as e:
             st.error(f"Erreur config: {e}")
@@ -521,10 +511,6 @@ with st.sidebar:
             acmg_to_keep = st.multiselect("Filtre Global ACMG", options=acmg_options, default=acmg_options, key="acmg_to_keep")
 
         with st.expander("Avancé & Filtres MSC"):
-            # CORRECTION 3 : Suppression du paramètre 'default' car 'key' est utilisé
-            # Streamlit utilisera automatiquement la valeur stockée dans st.session_state[key]
-            # qui a été initialisée plus haut.
-            
             sel_var = st.multiselect("Effet", options=v_opts, key="sel_var")
             sel_put = st.multiselect("Impact", options=p_opts, key="sel_put")
             sel_clin = st.multiselect("ClinVar", options=c_opts, key="sel_clin")
@@ -600,7 +586,7 @@ if st.session_state["analysis_done"]:
     # Onglets
     tabs = st.tabs(["📋 Tableau", "🔍 Inspecteur", "🧩 Corrélation", "📊 Spectre", "📍 Lollipops", "📈 QC", "🧬 Pathways", "🕸️ PPI", "🧬 Évolution Clonale"])
 
-    # --- TAB 1: AGGRID ---
+    # --- TAB 1: AGGRID (MODIFIÉ ICI) ---
     with tabs[0]:
         st.subheader("📋 Liste des variants filtrés")
         
@@ -658,15 +644,27 @@ if st.session_state["analysis_done"]:
         st.markdown("---")
         c_rep1, c_rep2 = st.columns([3, 1])
         with c_rep1:
-            st.info(f"**{len(df_selected)} variants** pour le rapport.")
+            st.info(f"**{len(df_selected)} variants** pour le rapport/export.")
             user_comment = st.text_area("Commentaire clinique :")
         with c_rep2:
             st.write("##")
             pat_id = df_selected["Pseudo"].unique()[0] if "Pseudo" in df_selected.columns and len(df_selected["Pseudo"].unique()) == 1 else "Multi"
+            
+            # --- BOUTON PDF (EXISTANT) ---
             try:
                 pdf_bytes = create_pdf_report(pat_id, df_selected, user_comment)
                 st.download_button("📥 PDF Report", pdf_bytes, f"Rapport_{pat_id}.pdf", "application/pdf", type="primary")
             except Exception as e: st.error(f"Erreur PDF: {e}")
+
+            # --- BOUTON CSV (NOUVEAU) ---
+            st.write("##") # Espaceur
+            csv_exp = df_selected.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Export CSV",
+                data=csv_exp,
+                file_name=f"Export_Variants_{pat_id}_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+            )
 
     # --- TAB 2: INSPECTEUR ---
     with tabs[1]:
