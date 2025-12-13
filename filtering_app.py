@@ -403,12 +403,11 @@ if "analysis_done" not in st.session_state:
     st.session_state["logs"] = []
 
 # ==========================================================
-# PARTIE SIDEBAR - RESTRUCTURÉE POUR LA ROBUSTESSE
+# PARTIE SIDEBAR - CORRIGÉE POUR LE JSON ET LES FILTRES
 # ==========================================================
 
 with st.sidebar:
     st.header("1. Données")
-    # On charge le CSV AVANT la config pour connaître les options disponibles
     uploaded_file = st.file_uploader("Fichier Variants", type=["csv", "tsv", "txt"])
     
     df_raw = None
@@ -425,43 +424,60 @@ with st.sidebar:
             if "Clinvar_significance" in df_raw.columns: 
                 c_opts = sorted(df_raw["Clinvar_significance"].fillna("Non Renseigné").unique())
 
-    # --- LOGIQUE DE GESTION DES SELECTIONS PAR DÉFAUT ---
-    # Si c'est la première fois qu'on voit ces options, on coche tout par défaut.
-    # Si on a chargé un JSON, les valeurs sont DÉJÀ dans session_state, donc on ne touche rien.
-    
-    if df_raw is not None:
-        if "sel_var" not in st.session_state: st.session_state["sel_var"] = v_opts
-        if "sel_put" not in st.session_state: st.session_state["sel_put"] = p_opts
-        if "sel_clin" not in st.session_state: st.session_state["sel_clin"] = c_opts
+            # --- CORRECTION 1 : INITIALISATION "TOUT COCHÉ PAR DÉFAUT" ---
+            # Si le state n'existe pas, on le met à TOUTES les options.
+            # Si le state existe, on nettoie pour enlever les options qui n'existent pas dans ce nouveau fichier
+            # (ce qui évite les erreurs de clé invalide quand on change de fichier CSV)
+
+            if "sel_var" not in st.session_state:
+                st.session_state["sel_var"] = v_opts
+            else:
+                # On garde seulement ce qui est valide dans le fichier actuel
+                st.session_state["sel_var"] = [x for x in st.session_state["sel_var"] if x in v_opts]
+                # Si la liste est vide après nettoyage, on re-sélectionne tout (sécurité)
+                if not st.session_state["sel_var"]: st.session_state["sel_var"] = v_opts
+
+            if "sel_put" not in st.session_state:
+                st.session_state["sel_put"] = p_opts
+            else:
+                st.session_state["sel_put"] = [x for x in st.session_state["sel_put"] if x in p_opts]
+                if not st.session_state["sel_put"]: st.session_state["sel_put"] = p_opts
+
+            if "sel_clin" not in st.session_state:
+                st.session_state["sel_clin"] = c_opts
+            else:
+                st.session_state["sel_clin"] = [x for x in st.session_state["sel_clin"] if x in c_opts]
+                if not st.session_state["sel_clin"]: st.session_state["sel_clin"] = c_opts
 
     # ------------------------------------------------------------
-    # GESTIONNAIRE DE CONFIGURATION (Placé APRÈS le chargement CSV)
+    # GESTIONNAIRE DE CONFIGURATION (JSON)
     # ------------------------------------------------------------
     st.header("0. Configuration")
     uploaded_config = st.file_uploader("📂 Charger stratégie (JSON)", type=["json"], key="config_uploader")
     
     if uploaded_config is not None:
         try:
-            # Bouton pour appliquer explicitement (plus fiable)
+            # CORRECTION 2 : APPLICATION FIABLE DU JSON
             if st.button("🔄 APPLIQUER LA CONFIGURATION"):
                 data = json.load(uploaded_config)
                 
-                # Mise à jour du session state
+                # On met à jour le session_state DIRECTEMENT
                 for key, value in data.items():
-                    # --- NETTOYAGE DES FILTRES ---
-                    # Si le JSON demande "Missense" mais que "Missense" n'existe pas dans ce fichier,
-                    # on le retire pour éviter que Streamlit ne plante.
+                    # Pour les listes, on vérifie que les valeurs existent dans le fichier actuel
                     if key == "sel_var" and isinstance(value, list):
-                        value = [x for x in value if x in v_opts]
+                        valid_vals = [x for x in value if x in v_opts]
+                        st.session_state[key] = valid_vals
                     elif key == "sel_put" and isinstance(value, list):
-                        value = [x for x in value if x in p_opts]
+                        valid_vals = [x for x in value if x in p_opts]
+                        st.session_state[key] = valid_vals
                     elif key == "sel_clin" and isinstance(value, list):
-                        value = [x for x in value if x in c_opts]
-                    
-                    st.session_state[key] = value
+                        valid_vals = [x for x in value if x in c_opts]
+                        st.session_state[key] = valid_vals
+                    else:
+                        st.session_state[key] = value
                 
                 st.success("Configuration chargée !")
-                st.rerun() # Force le rafraîchissement immédiat
+                st.rerun() # INDISPENSABLE : Recharge l'interface pour afficher les nouvelles valeurs
                 
         except Exception as e:
             st.error(f"Erreur config: {e}")
@@ -479,7 +495,7 @@ with st.sidebar:
     st.markdown("---")
 
     # ------------------------------------------------------------
-    # FORMULAIRE (Widgets liés au session_state)
+    # FORMULAIRE
     # ------------------------------------------------------------
     with st.form("params"):
         st.header("2. Paramètres")
@@ -505,7 +521,10 @@ with st.sidebar:
             acmg_to_keep = st.multiselect("Filtre Global ACMG", options=acmg_options, default=acmg_options, key="acmg_to_keep")
 
         with st.expander("Avancé & Filtres MSC"):
-            # Les options sont maintenant correctement définies et synchronisées
+            # CORRECTION 3 : Suppression du paramètre 'default' car 'key' est utilisé
+            # Streamlit utilisera automatiquement la valeur stockée dans st.session_state[key]
+            # qui a été initialisée plus haut.
+            
             sel_var = st.multiselect("Effet", options=v_opts, key="sel_var")
             sel_put = st.multiselect("Impact", options=p_opts, key="sel_put")
             sel_clin = st.multiselect("ClinVar", options=c_opts, key="sel_clin")
@@ -766,13 +785,14 @@ if st.session_state["analysis_done"]:
                         agraph(nodes=nodes, edges=edges, config=Config(width=700, height=500, directed=False, physics=True))
                     else: st.warning("Pas d'interactions.")
     
-    # --- TAB 9: EVOLUTION CLONALE ---
+    # --- TAB 9: EVOLUTION CLONALE (AVEC RAPPORT PDF GLOBAL) ---
     with tabs[8]:
         st.subheader("🧬 Analyse de l'Architecture Clonale")
         
+        # Vérification des colonnes nécessaires
         if "Pseudo" in df_res.columns and "Allelic_ratio" in df_res.columns:
             
-            # --- SECTION 1 : VISUALISATION INTERACTIVE ---
+            # --- SECTION 1 : VISUALISATION INTERACTIVE (Reste inchangée) ---
             c_sel1, c_sel2 = st.columns([1, 3])
             with c_sel1:
                 patients_list = sorted(df_res["Pseudo"].astype(str).unique())
@@ -834,24 +854,26 @@ if st.session_state["analysis_done"]:
                 pdf = PDFReport()
                 progress_bar = st.progress(0)
                 
+                # Création d'un dossier temporaire pour les images
                 with tempfile.TemporaryDirectory() as tmp_dir:
                     total_pats = len(patients_list)
                     
                     for idx, pat in enumerate(patients_list):
                         progress_bar.progress((idx + 1) / total_pats)
                         
+                        # Filtrage et Calcul
                         d_temp = df_res[df_res["Pseudo"] == pat].copy().dropna(subset=["Allelic_ratio"])
                         
                         if len(d_temp) >= 3:
                             try:
                                 # 1. Calculs Clusters
-                                km = KMeans(n_clusters=3, random_state=42, n_init=10)
+                                km = KMeans(n_clusters=3, random_state=42, n_init=10) # Force 3 clusters pour standardisation
                                 d_temp["Cluster_ID"] = km.fit_predict(d_temp[["Allelic_ratio"]].values)
                                 cents = d_temp.groupby("Cluster_ID")["Allelic_ratio"].mean().sort_values().index
                                 cmap = {oid: f"C{i+1}" for i, oid in enumerate(cents)}
                                 d_temp["Cluster_Label"] = d_temp["Cluster_ID"].map(cmap)
                                 
-                                # 2. Génération Graphique Matplotlib
+                                # 2. Génération Graphique Matplotlib (Statique pour PDF)
                                 plt.figure(figsize=(10, 5))
                                 sns.histplot(data=d_temp, x="Allelic_ratio", hue="Cluster_Label", 
                                              bins=30, kde=True, palette="viridis", element="step")
@@ -860,6 +882,7 @@ if st.session_state["analysis_done"]:
                                 plt.xlabel("VAF")
                                 plt.ylabel("Count")
                                 
+                                # Sauvegarde image
                                 img_path = os.path.join(tmp_dir, f"{clean_text(pat)}.png")
                                 plt.savefig(img_path, dpi=100, bbox_inches='tight')
                                 plt.close()
@@ -869,18 +892,22 @@ if st.session_state["analysis_done"]:
                                 pdf.set_font("Arial", 'B', 16)
                                 pdf.cell(0, 10, f"Patient : {pat}", 0, 1, 'L')
                                 
+                                # Image
                                 pdf.image(img_path, x=10, y=30, w=190)
                                 
+                                # Tableau
                                 pdf.set_y(130)
                                 pdf.set_font("Arial", 'B', 10)
                                 pdf.cell(0, 10, "Tableau des Variants (Top 15 par VAF)", 0, 1)
                                 
+                                # En-têtes tableau
                                 cols = [("Gene", 25), ("Variant", 50), ("VAF", 20), ("Clone", 20), ("ACMG", 40)]
                                 pdf.set_fill_color(220, 220, 220)
                                 for c_name, c_w in cols:
                                     pdf.cell(c_w, 8, c_name, 1, 0, 'C', 1)
                                 pdf.ln()
                                 
+                                # Données tableau (Trié par Clone puis VAF)
                                 pdf.set_font("Arial", '', 9)
                                 d_table = d_temp.sort_values(["Cluster_Label", "Allelic_ratio"], ascending=[True, False]).head(15)
                                 
@@ -901,6 +928,7 @@ if st.session_state["analysis_done"]:
                             except Exception as e:
                                 st.warning(f"Skipped {pat}: {e}")
                 
+                # Téléchargement
                 pdf_bytes = pdf.output(dest='S').encode('latin-1', 'ignore')
                 st.download_button(
                     label="📥 Télécharger le Rapport PDF",
@@ -913,5 +941,6 @@ if st.session_state["analysis_done"]:
 
         else:
             st.warning("Données insuffisantes (Pseudo/VAF manquants).")
+
 elif not submitted:
     st.info("👈 Chargez fichier + Lancer.")
