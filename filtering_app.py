@@ -784,105 +784,157 @@ if st.session_state["analysis_done"]:
                     else: st.warning("Pas d'interactions.")
     
 # --- TAB 10: PATHOGENIC MATRIX (AMÉLIORÉ) ---
-# --- TAB 10: PATHOGENIC MATRIX (FINAL) ---
+# --- TAB 10: PATHOGENIC MATRIX (DUAL COLOR / SPLIT) ---
 with tabs[9]:
-    st.subheader("🔥 Matrice Pathogènes (High-Def & Waterfall)")
-    st.info("Rouge = Pathogenic, Orange = Likely Pathogenic. Gènes triés par fréquence (Haut-Bas), Patients triés par charge (Gauche-Droite).")
+    st.subheader("🔥 Matrice 'OncoPrint' (ACMG + Type Mutation)")
+    st.info("Chaque carré est divisé en deux :\n- ◤ **Triangle Haut-Gauche** : Classification ACMG (Rouge/Orange)\n- ◢ **Triangle Bas-Droite** : Type de Mutation (Noir=Tronquant, Bleu=Missense, etc.)")
     
-    # 1. Filtrage strict P/LP
+    # 1. Filtrage P/LP
     df_patho = df_res[df_res["ACMG_Class"].isin(["Pathogenic", "Likely Pathogenic"])].copy()
     
     if "Pseudo" in df_patho.columns and "Gene_symbol" in df_patho.columns and not df_patho.empty:
         
-        # 2. Scoring (P=2, LP=1)
+        # --- A. PREPARATION DU TRI (Comme avant) ---
+        # On crée une matrice temporaire juste pour calculer l'ordre de tri
         df_patho["Severity_Score"] = df_patho["ACMG_Class"].map({"Pathogenic": 2, "Likely Pathogenic": 1})
+        matrix_temp = df_patho.pivot_table(index="Gene_symbol", columns="Pseudo", values="Severity_Score", aggfunc='max', fill_value=0)
         
-        # Pivot
-        matrix_score = df_patho.pivot_table(
-            index="Gene_symbol", 
-            columns="Pseudo", 
-            values="Severity_Score", 
-            aggfunc='max', 
-            fill_value=0
-        )
+        # Tri Gènes (Axe Y) : Fréquents en HAUT (Ordre Croissant car Plotly dessine de bas en haut)
+        gene_freq = (matrix_temp > 0).sum(axis=1)
+        sorted_genes = gene_freq.sort_values(ascending=True).index.tolist()
         
-        # 3. Double Tri (Waterfall Sort)
-        # A. Tri des Gènes (Lignes) : Les plus fréquents en haut
-        gene_freq = (matrix_score > 0).sum(axis=1)
-        sorted_genes = gene_freq.sort_values(ascending=False).index
+        # Tri Patients (Axe X) : Chargés à GAUCHE (Ordre Décroissant)
+        pat_burden = (matrix_temp > 0).sum(axis=0)
+        sorted_pats = pat_burden.sort_values(ascending=False).index.tolist()
         
-        # B. Tri des Patients (Colonnes) : Ceux avec le plus de variants à gauche
-        # Si égalité, on peut trier par nom, mais ici on privilégie la charge mutationnelle (burden)
-        pat_burden = (matrix_score > 0).sum(axis=0)
-        # On trie par charge décroissante
-        sorted_pats = pat_burden.sort_values(ascending=False).index
+        # --- B. PREPARATION DES COULEURS ---
         
-        # Réorganisation de la matrice
-        matrix_sorted = matrix_score.loc[sorted_genes, sorted_pats]
+        # Fonction pour simplifier le type de mutation
+        def get_mutation_category(eff):
+            e = str(eff).lower()
+            if any(x in e for x in ["stop", "frameshift", "nonsense", "splice_acceptor", "splice_donor"]):
+                return "Truncating" # Grave (Noir)
+            if "missense" in e:
+                return "Missense"   # (Bleu)
+            if "splice" in e:       # Splice region mais pas donor/acceptor
+                return "Splice"     # (Vert)
+            return "Other"          # (Gris)
+
+        df_patho["Mut_Cat"] = df_patho["Variant_effect"].apply(get_mutation_category)
         
-        # 4. Configuration Visuelle
-        # Palette: 0=Transparent/Gris, 1=Orange, 2=Rouge
-        colorscale = [
-            [0.0, "#f4f4f4"], # Gris très clair pour les cases vides (au lieu de blanc pour voir la grille)
-            [0.33, "#f4f4f4"],
-            [0.33, "#f0ad4e"], # Likely Pathogenic
-            [0.66, "#f0ad4e"],
-            [0.66, "#d9534f"], # Pathogenic
-            [1.0, "#d9534f"]
-        ]
+        # Mappings Couleurs
+        color_map_acmg = {"Pathogenic": "#d9534f", "Likely Pathogenic": "#f0ad4e"}
+        color_map_type = {
+            "Truncating": "#2c3e50", # Noir/Gris foncé (Stop, Frameshift)
+            "Missense": "#3498db",   # Bleu
+            "Splice": "#27ae60",     # Vert
+            "Other": "#95a5a6"       # Gris clair
+        }
         
-        # Calcul hauteur dynamique
-        dyn_height = max(600, len(matrix_sorted) * 35) # Un peu plus d'espace par ligne
+        # On ne garde que le variant le plus sévère par case pour l'affichage
+        # (Si un patient a 2 variants sur le même gène, on privilégie P sur LP, et Truncating sur Missense)
+        df_viz = df_patho.sort_values(["Severity_Score", "Mut_Cat"], ascending=False).drop_duplicates(subset=["Pseudo", "Gene_symbol"])
         
-        fig = go.Figure(data=go.Heatmap(
-            z=matrix_sorted.values,
-            x=matrix_sorted.columns,
-            y=matrix_sorted.index,
-            colorscale=colorscale,
-            zmin=0, zmax=2,
-            showscale=False,
-            # Quadrillage :
-            xgap=3, # Espace vertical (blanc) entre les colonnes
-            ygap=3, # Espace horizontal (blanc) entre les lignes
-            hovertemplate='<b>Patient:</b> %{x}<br><b>Gène:</b> %{y}<br><b>Statut:</b> %{text}<extra></extra>',
-            text=[[ "Pathogenic" if v==2 else ("Likely Pathogenic" if v==1 else "Absent") for v in row ] for row in matrix_sorted.values]
+        # On filtre pour ne garder que ceux dans la liste triée (sécurité)
+        df_viz = df_viz[df_viz["Pseudo"].isin(sorted_pats) & df_viz["Gene_symbol"].isin(sorted_genes)]
+        
+        # --- C. CONSTRUCTION DU GRAPHIQUE (SCATTER PLOT) ---
+        
+        # Hauteur dynamique
+        dyn_height = max(650, len(sorted_genes) * 35)
+        
+        fig = go.Figure()
+        
+        # TRACE 1 : Triangle Haut-Gauche (ACMG)
+        # symbol 'triangle-nw' = North-West
+        fig.add_trace(go.Scatter(
+            x=df_viz["Pseudo"],
+            y=df_viz["Gene_symbol"],
+            mode='markers',
+            marker=dict(
+                symbol='triangle-nw',
+                size=24, # Taille ajustée pour former un carré
+                color=df_viz["ACMG_Class"].map(color_map_acmg),
+                line=dict(width=0) # Pas de bordure
+            ),
+            name="ACMG Status",
+            hoverinfo='skip' # On gère le hover dans une trace invisible ou combinée
+        ))
+        
+        # TRACE 2 : Triangle Bas-Droite (Type Mutation)
+        # symbol 'triangle-se' = South-East
+        fig.add_trace(go.Scatter(
+            x=df_viz["Pseudo"],
+            y=df_viz["Gene_symbol"],
+            mode='markers',
+            marker=dict(
+                symbol='triangle-se',
+                size=24,
+                color=df_viz["Mut_Cat"].map(color_map_type),
+                line=dict(width=0)
+            ),
+            name="Mutation Type",
+            hovertemplate='<b>Patient:</b> %{x}<br><b>Gène:</b> %{y}<br><b>Type:</b> %{text}<extra></extra>',
+            text=df_viz["Mut_Cat"] + " (" + df_viz["Variant"] + ")"
         ))
 
-        # Légende artificielle
-        fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(size=12, color='#d9534f', symbol='square'), name='Pathogenic'))
-        fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(size=12, color='#f0ad4e', symbol='square'), name='Likely Pathogenic'))
+        # --- D. AJOUT DE LA LEGENDE MANUELLE ---
+        # On ajoute des points invisibles ("ghost traces") pour créer une belle légende
         
-        # Layout propre
+        # Légende ACMG
+        for label, color in color_map_acmg.items():
+            fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', 
+                                     marker=dict(symbol='triangle-nw', size=15, color=color), name=f"ACMG: {label}"))
+            
+        # Légende Type
+        for label, color in color_map_type.items():
+            fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', 
+                                     marker=dict(symbol='triangle-se', size=15, color=color), name=f"Type: {label}"))
+
+        # --- E. LAYOUT & GRILLE ---
         fig.update_layout(
-            title_text=f"Matrice de Variants ({len(df_patho)} variants, {len(matrix_sorted.columns)} patients)",
+            title_text=f"OncoPrint Hybride ({len(df_patho)} variants)",
             title_x=0.5,
-            xaxis_title="Patients (Triés par charge décroissante)",
-            yaxis_title=None,
             height=dyn_height,
-            plot_bgcolor='white', # Fond blanc derrière les gaps crée l'effet de grille
-            yaxis=dict(autorange="reversed", tickfont=dict(size=14)), # Gros texte pour les gènes
-            xaxis=dict(tickangle=-45, tickfont=dict(size=10)),
+            xaxis=dict(
+                title="Patients (Triés par charge)",
+                tickangle=-45,
+                categoryorder='array',
+                categoryarray=sorted_pats, # Force l'ordre trié
+                showgrid=True,
+                gridcolor='#eeeeee',
+                zeroline=False
+            ),
+            yaxis=dict(
+                title=None,
+                categoryorder='array',
+                categoryarray=sorted_genes, # Force l'ordre trié (Haut fréquence en haut)
+                tickfont=dict(size=14),
+                showgrid=True,
+                gridcolor='#eeeeee',
+                zeroline=False
+            ),
+            plot_bgcolor='white', # Fond blanc
             legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center")
         )
-        
-        # 5. Configuration de l'Export (SVG/PDF)
-        # Cela modifie le bouton "Appareil photo" dans la barre d'outils du graph
+
+        # Configuration Export SVG/PDF
         config = {
             'toImageButtonOptions': {
-                'format': 'svg', # SVG est vectoriel (comme PDF), parfait pour Illustrator/Inkscape
-                'filename': f'OncoPrint_Export_{datetime.now().strftime("%Y%m%d")}',
+                'format': 'svg',
+                'filename': f'OncoPrint_Split_{datetime.now().strftime("%Y%m%d")}',
                 'height': dyn_height,
-                'width': max(1000, len(matrix_sorted.columns)*40), # Largeur adaptative pour l'export
-                'scale': 1 # Echelle
+                'width': max(1000, len(sorted_pats)*40),
+                'scale': 1
             },
             'displayModeBar': True
         }
         
         st.plotly_chart(fig, use_container_width=True, config=config)
-        st.caption("ℹ️ Pour télécharger en haute définition : passez la souris sur le graphique et cliquez sur l'icône **appareil photo** (Download plot as png/svg).")
+        st.caption("ℹ️ Le graphique combine deux informations par case. Utilisez l'export SVG (appareil photo) pour une qualité parfaite.")
         
         with st.expander("Voir les données brutes"):
-            st.dataframe(matrix_sorted)
+            st.dataframe(df_viz[["Pseudo", "Gene_symbol", "Variant", "ACMG_Class", "Mut_Cat", "Severity_Score"]])
 
     else:
         st.warning("Aucun variant Pathogenic ou Likely Pathogenic trouvé.")
