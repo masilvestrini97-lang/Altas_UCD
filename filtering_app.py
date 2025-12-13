@@ -12,8 +12,8 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
+import plotly.io as pio # Nécessaire pour l'export PDF
 from scipy.stats import hypergeom
-import plotly.io as pio # Nécessaire pour l'export
 
 # --- IMPORTS POUR VISUALISATION & RAPPORT ---
 import matplotlib.pyplot as plt
@@ -585,9 +585,20 @@ if st.session_state["analysis_done"]:
     k3.metric("Ratio", f"{round(n_fin/n_ini*100, 2) if n_ini>0 else 0}%")
 
     # Onglets
-    tabs = st.tabs(["📋 Tableau", "🔍 Inspecteur", "🧩 Corrélation", "📊 Spectre", "📍 Lollipops", "📈 QC", "🧬 Pathways", "🕸️ PPI", "🧬 Évolution Clonale", "Matrice"])
+    tabs = st.tabs([
+        "📋 Tableau", 
+        "🔍 Inspecteur", 
+        "🧩 Corrélation", 
+        "📊 Spectre", 
+        "📍 Lollipops", 
+        "📈 QC", 
+        "🧬 Pathways", 
+        "🕸️ PPI", 
+        "🧬 Évolution Clonale", 
+        "🔥 Matrice"
+    ])
 
-    # --- TAB 1: AGGRID (MODIFIÉ ICI) ---
+    # --- TAB 1: AGGRID ---
     with tabs[0]:
         st.subheader("📋 Liste des variants filtrés")
         
@@ -784,139 +795,293 @@ if st.session_state["analysis_done"]:
                         agraph(nodes=nodes, edges=edges, config=Config(width=700, height=500, directed=False, physics=True))
                     else: st.warning("Pas d'interactions.")
     
-# --- TAB 10: PATHOGENIC MATRIX (AMÉLIORÉ) ---
-# --- TAB 10: PATHOGENIC MATRIX (FINAL - PDF EXPORT) ---
-
-
-with tabs[9]:
-    st.subheader("🔥 Matrice 'OncoPrint' (ACMG + Type Mutation)")
-    st.info("Chaque carré est divisé en deux : Haut-Gauche (ACMG) / Bas-Droite (Type).")
-
-    # 1. Filtrage P/LP
-    df_patho = df_res[df_res["ACMG_Class"].isin(["Pathogenic", "Likely Pathogenic"])].copy()
-
-    if "Pseudo" in df_patho.columns and "Gene_symbol" in df_patho.columns and not df_patho.empty:
+    # --- TAB 9: EVOLUTION CLONALE (AVEC RAPPORT PDF GLOBAL) ---
+    with tabs[8]:
+        st.subheader("🧬 Analyse de l'Architecture Clonale")
         
-        # --- A. PREPARATION DU TRI ---
-        # Scoring pour le tri
-        df_patho["Severity_Score"] = df_patho["ACMG_Class"].map({"Pathogenic": 2, "Likely Pathogenic": 1})
-        matrix_temp = df_patho.pivot_table(index="Gene_symbol", columns="Pseudo", values="Severity_Score", aggfunc='max', fill_value=0)
-        
-        # Tri Gènes (Axe Y) : Fréquents en HAUT (Ordre Croissant pour Plotly)
-        gene_freq = (matrix_temp > 0).sum(axis=1)
-        sorted_genes = gene_freq.sort_values(ascending=True).index.tolist()
-        
-        # Tri Patients (Axe X) : Chargés à GAUCHE (Ordre Décroissant)
-        pat_burden = (matrix_temp > 0).sum(axis=0)
-        sorted_pats = pat_burden.sort_values(ascending=False).index.tolist()
-        
-        # --- B. COULEURS & CATEGORIES ---
-        def get_mutation_category(eff):
-            e = str(eff).lower()
-            if any(x in e for x in ["stop", "frameshift", "nonsense", "splice_acceptor", "splice_donor"]): return "Truncating"
-            if "missense" in e: return "Missense"
-            if "splice" in e: return "Splice"
-            return "Other"
-
-        df_patho["Mut_Cat"] = df_patho["Variant_effect"].apply(get_mutation_category)
-        
-        color_map_acmg = {"Pathogenic": "#d9534f", "Likely Pathogenic": "#f0ad4e"}
-        color_map_type = {"Truncating": "#2c3e50", "Missense": "#3498db", "Splice": "#27ae60", "Other": "#95a5a6"}
-        
-        # Nettoyage doublons (garde le plus sévère)
-        df_viz = df_patho.sort_values(["Severity_Score", "Mut_Cat"], ascending=False).drop_duplicates(subset=["Pseudo", "Gene_symbol"])
-        df_viz = df_viz[df_viz["Pseudo"].isin(sorted_pats) & df_viz["Gene_symbol"].isin(sorted_genes)]
-        
-        # --- C. DIMENSIONS DYNAMIQUES (CRUCIAL POUR L'EXPORT) ---
-        # On calcule la taille nécessaire en pixels
-        # Largeur = (Nb Patients * 35px) + 200px de marge pour les noms de gènes à gauche
-        calc_width = max(800, len(sorted_pats) * 35 + 300) 
-        # Hauteur = (Nb Gènes * 35px) + 250px de marge pour les noms de patients en bas + titre
-        calc_height = max(600, len(sorted_genes) * 35 + 250)
-        
-        # --- D. CONSTRUCTION GRAPHIQUE ---
-        fig = go.Figure()
-        
-        # Triangle Haut-Gauche (ACMG)
-        fig.add_trace(go.Scatter(
-            x=df_viz["Pseudo"], y=df_viz["Gene_symbol"], mode='markers',
-            marker=dict(symbol='triangle-nw', size=24, color=df_viz["ACMG_Class"].map(color_map_acmg), line=dict(width=0)),
-            name="ACMG", hoverinfo='skip'
-        ))
-        
-        # Triangle Bas-Droite (Type)
-        fig.add_trace(go.Scatter(
-            x=df_viz["Pseudo"], y=df_viz["Gene_symbol"], mode='markers',
-            marker=dict(symbol='triangle-se', size=24, color=df_viz["Mut_Cat"].map(color_map_type), line=dict(width=0)),
-            name="Type", hovertemplate='<b>Patient:</b> %{x}<br><b>Gène:</b> %{y}<br><b>Type:</b> %{text}<extra></extra>',
-            text=df_viz["Mut_Cat"] + " (" + df_viz["Variant"] + ")"
-        ))
-
-        # Légendes fantômes
-        for l, c in color_map_acmg.items(): fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(symbol='triangle-nw', size=15, color=c), name=f"ACMG: {l}"))
-        for l, c in color_map_type.items(): fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(symbol='triangle-se', size=15, color=c), name=f"Type: {l}"))
-
-        # --- E. LAYOUT ---
-        fig.update_layout(
-            title=dict(text=f"OncoPrint ({len(df_patho)} variants)", x=0.5),
-            width=calc_width,  # On force la largeur calculée
-            height=calc_height, # On force la hauteur calculée
-            xaxis=dict(
-                title="Patients", tickangle=-45, 
-                categoryorder='array', categoryarray=sorted_pats,
-                showgrid=True, gridcolor='#eeeeee', zeroline=False
-            ),
-            yaxis=dict(
-                title=None, tickfont=dict(size=14),
-                categoryorder='array', categoryarray=sorted_genes,
-                showgrid=True, gridcolor='#eeeeee', zeroline=False
-            ),
-            plot_bgcolor='white',
-            legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center"),
-            # Marges automatiques pour éviter que les labels ne soient coupés
-            margin=dict(l=150, r=50, t=100, b=150) 
-        )
-
-        # Affichage interactif
-        # On corrige aussi le bouton "Appareil photo" natif
-        config = {
-            'toImageButtonOptions': {
-                'format': 'svg', 
-                'filename': 'OncoPrint_Export',
-                'height': calc_height, 
-                'width': calc_width,
-                'scale': 1.5 # Augmente la qualité
-            }
-        }
-        st.plotly_chart(fig, use_container_width=True, config=config)
-
-        # --- F. BOUTON EXPORT PDF DÉDIÉ ---
-        c_exp1, c_exp2 = st.columns([1, 4])
-        with c_exp1:
-            st.write("###")
-            try:
-                # Tentative de génération du PDF via Python (nécessite kaleido)
-                # On utilise les dimensions calculées pour garantir que tout rentre
-                pdf_bytes = pio.to_image(fig, format="pdf", width=calc_width, height=calc_height, scale=1)
+        # Vérification des colonnes nécessaires
+        if "Pseudo" in df_res.columns and "Allelic_ratio" in df_res.columns:
+            
+            # --- SECTION 1 : VISUALISATION INTERACTIVE ---
+            c_sel1, c_sel2 = st.columns([1, 3])
+            with c_sel1:
+                patients_list = sorted(df_res["Pseudo"].astype(str).unique())
+                sel_pat_clon = st.selectbox("Sélectionner un Patient :", patients_list)
+            
+            n_clusters_def = 3 
+            
+            if sel_pat_clon:
+                df_clon = df_res[df_res["Pseudo"] == sel_pat_clon].copy()
+                df_clon = df_clon.dropna(subset=["Allelic_ratio"])
                 
+                col_c1, col_c2 = st.columns([1, 3])
+                with col_c1:
+                    n_clusters = st.slider("Nombre de clones", 1, 5, n_clusters_def, key="slider_clon_indiv")
+                    st.info(f"Variants : {len(df_clon)}")
+                
+                with col_c2:
+                    if len(df_clon) < 3:
+                        st.warning("Pas assez de variants (<3).")
+                    else:
+                        try:
+                            # K-Means
+                            X = df_clon[["Allelic_ratio"]].values
+                            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+                            df_clon["Cluster_ID"] = kmeans.fit_predict(X)
+                            
+                            centroids = df_clon.groupby("Cluster_ID")["Allelic_ratio"].mean().sort_values().index
+                            cluster_map = {old_id: f"C{i+1}" for i, old_id in enumerate(centroids)}
+                            df_clon["Cluster_Label"] = df_clon["Cluster_ID"].map(cluster_map)
+                            
+                            # Plotly (Interactif)
+                            fig_clon = px.histogram(
+                                df_clon, x="Allelic_ratio", color="Cluster_Label", 
+                                nbins=30, marginal="rug", opacity=0.7, barmode="overlay",
+                                title=f"Architecture - {sel_pat_clon}",
+                                color_discrete_sequence=px.colors.qualitative.G10
+                            )
+                            fig_clon.update_layout(xaxis_range=[0, 1.05])
+                            st.plotly_chart(fig_clon, use_container_width=True)
+                            
+                        except Exception as e: st.error(f"Erreur : {e}")
+
+            # --- SECTION 2 : EXPORT PDF GLOBAL ---
+            st.markdown("---")
+            st.subheader("📄 Rapport PDF Global")
+            st.info("Génère un PDF unique avec une page par patient (Graphique + Tableau).")
+            
+            if st.button("Générer le PDF Global"):
+                
+                class PDFReport(FPDF):
+                    def header(self):
+                        self.set_font('Arial', 'B', 10)
+                        self.cell(0, 10, 'Atlas Clonal Analysis Report', 0, 1, 'R')
+                    def footer(self):
+                        self.set_y(-15)
+                        self.set_font('Arial', 'I', 8)
+                        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+
+                pdf = PDFReport()
+                progress_bar = st.progress(0)
+                
+                # Création d'un dossier temporaire pour les images
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    total_pats = len(patients_list)
+                    
+                    for idx, pat in enumerate(patients_list):
+                        progress_bar.progress((idx + 1) / total_pats)
+                        
+                        # Filtrage et Calcul
+                        d_temp = df_res[df_res["Pseudo"] == pat].copy().dropna(subset=["Allelic_ratio"])
+                        
+                        if len(d_temp) >= 3:
+                            try:
+                                # 1. Calculs Clusters
+                                km = KMeans(n_clusters=3, random_state=42, n_init=10) # Force 3 clusters pour standardisation
+                                d_temp["Cluster_ID"] = km.fit_predict(d_temp[["Allelic_ratio"]].values)
+                                cents = d_temp.groupby("Cluster_ID")["Allelic_ratio"].mean().sort_values().index
+                                cmap = {oid: f"C{i+1}" for i, oid in enumerate(cents)}
+                                d_temp["Cluster_Label"] = d_temp["Cluster_ID"].map(cmap)
+                                
+                                # 2. Génération Graphique Matplotlib (Statique pour PDF)
+                                plt.figure(figsize=(10, 5))
+                                sns.histplot(data=d_temp, x="Allelic_ratio", hue="Cluster_Label", 
+                                             bins=30, kde=True, palette="viridis", element="step")
+                                plt.title(f"Patient: {pat} - Architecture Clonale")
+                                plt.xlim(0, 1.05)
+                                plt.xlabel("VAF")
+                                plt.ylabel("Count")
+                                
+                                # Sauvegarde image
+                                img_path = os.path.join(tmp_dir, f"{clean_text(pat)}.png")
+                                plt.savefig(img_path, dpi=100, bbox_inches='tight')
+                                plt.close()
+
+                                # 3. Ajout Page PDF
+                                pdf.add_page()
+                                pdf.set_font("Arial", 'B', 16)
+                                pdf.cell(0, 10, f"Patient : {pat}", 0, 1, 'L')
+                                
+                                # Image
+                                pdf.image(img_path, x=10, y=30, w=190)
+                                
+                                # Tableau
+                                pdf.set_y(130)
+                                pdf.set_font("Arial", 'B', 10)
+                                pdf.cell(0, 10, "Tableau des Variants (Top 15 par VAF)", 0, 1)
+                                
+                                # En-têtes tableau
+                                cols = [("Gene", 25), ("Variant", 50), ("VAF", 20), ("Clone", 20), ("ACMG", 40)]
+                                pdf.set_fill_color(220, 220, 220)
+                                for c_name, c_w in cols:
+                                    pdf.cell(c_w, 8, c_name, 1, 0, 'C', 1)
+                                pdf.ln()
+                                
+                                # Données tableau (Trié par Clone puis VAF)
+                                pdf.set_font("Arial", '', 9)
+                                d_table = d_temp.sort_values(["Cluster_Label", "Allelic_ratio"], ascending=[True, False]).head(15)
+                                
+                                for _, row in d_table.iterrows():
+                                    gene = str(row.get("Gene_symbol", ""))[:10]
+                                    var = str(row.get("Variant", ""))[:25]
+                                    vaf = f"{row.get('Allelic_ratio', 0):.2f}"
+                                    clone = str(row.get("Cluster_Label", ""))
+                                    acmg = str(row.get("ACMG_Class", ""))[:20]
+                                    
+                                    pdf.cell(25, 7, gene, 1)
+                                    pdf.cell(50, 7, var, 1)
+                                    pdf.cell(20, 7, vaf, 1, 0, 'C')
+                                    pdf.cell(20, 7, clone, 1, 0, 'C')
+                                    pdf.cell(40, 7, acmg, 1)
+                                    pdf.ln()
+                                    
+                            except Exception as e:
+                                st.warning(f"Skipped {pat}: {e}")
+                
+                # Téléchargement
+                pdf_bytes = pdf.output(dest='S').encode('latin-1', 'ignore')
                 st.download_button(
-                    label="📄 Télécharger en PDF",
+                    label="📥 Télécharger le Rapport PDF",
                     data=pdf_bytes,
-                    file_name=f"OncoPrint_Full_{datetime.now().strftime('%Y%m%d')}.pdf",
+                    file_name=f"Rapport_Clonal_Global_{datetime.now().strftime('%Y%m%d')}.pdf",
                     mime="application/pdf",
                     type="primary"
                 )
-            except ImportError:
-                st.error("⚠️ Module 'kaleido' manquant.")
-                st.info("Pour activer l'export PDF, installez-le : `pip install -U kaleido`")
-            except Exception as e:
-                st.error(f"Erreur Export : {e}")
-                
-        with st.expander("Voir les données brutes"):
-            st.dataframe(df_viz)
+                progress_bar.empty()
 
-    else:
-        st.warning("Aucun variant pertinent trouvé.")
-# --- CORRECTION ICI ---
+        else:
+            st.warning("Données insuffisantes (Pseudo/VAF manquants).")
+
+    
+
+    # --- TAB 10: PATHOGENIC MATRIX (FINAL - PDF EXPORT) ---
+    with tabs[9]:
+        st.subheader("🔥 Matrice 'OncoPrint' (ACMG + Type Mutation)")
+        st.info("Chaque carré est divisé en deux : Haut-Gauche (ACMG) / Bas-Droite (Type).")
+
+        # 1. Filtrage P/LP
+        df_patho = df_res[df_res["ACMG_Class"].isin(["Pathogenic", "Likely Pathogenic"])].copy()
+
+        if "Pseudo" in df_patho.columns and "Gene_symbol" in df_patho.columns and not df_patho.empty:
+            
+            # --- A. PREPARATION DU TRI ---
+            # Scoring pour le tri
+            df_patho["Severity_Score"] = df_patho["ACMG_Class"].map({"Pathogenic": 2, "Likely Pathogenic": 1})
+            matrix_temp = df_patho.pivot_table(index="Gene_symbol", columns="Pseudo", values="Severity_Score", aggfunc='max', fill_value=0)
+            
+            # Tri Gènes (Axe Y) : Fréquents en HAUT (Ordre Croissant pour Plotly)
+            gene_freq = (matrix_temp > 0).sum(axis=1)
+            sorted_genes = gene_freq.sort_values(ascending=True).index.tolist()
+            
+            # Tri Patients (Axe X) : Chargés à GAUCHE (Ordre Décroissant)
+            pat_burden = (matrix_temp > 0).sum(axis=0)
+            sorted_pats = pat_burden.sort_values(ascending=False).index.tolist()
+            
+            # --- B. COULEURS & CATEGORIES ---
+            def get_mutation_category(eff):
+                e = str(eff).lower()
+                if any(x in e for x in ["stop", "frameshift", "nonsense", "splice_acceptor", "splice_donor"]): return "Truncating"
+                if "missense" in e: return "Missense"
+                if "splice" in e: return "Splice"
+                return "Other"
+
+            df_patho["Mut_Cat"] = df_patho["Variant_effect"].apply(get_mutation_category)
+            
+            color_map_acmg = {"Pathogenic": "#d9534f", "Likely Pathogenic": "#f0ad4e"}
+            color_map_type = {"Truncating": "#2c3e50", "Missense": "#3498db", "Splice": "#27ae60", "Other": "#95a5a6"}
+            
+            # Nettoyage doublons (garde le plus sévère)
+            df_viz = df_patho.sort_values(["Severity_Score", "Mut_Cat"], ascending=False).drop_duplicates(subset=["Pseudo", "Gene_symbol"])
+            df_viz = df_viz[df_viz["Pseudo"].isin(sorted_pats) & df_viz["Gene_symbol"].isin(sorted_genes)]
+            
+            # --- C. DIMENSIONS DYNAMIQUES (CRUCIAL POUR L'EXPORT) ---
+            # On calcule la taille nécessaire en pixels
+            # Largeur = (Nb Patients * 35px) + 300px de marge pour les noms de gènes à gauche
+            calc_width = max(800, len(sorted_pats) * 35 + 300) 
+            # Hauteur = (Nb Gènes * 35px) + 250px de marge pour les noms de patients en bas + titre
+            calc_height = max(600, len(sorted_genes) * 35 + 250)
+            
+            # --- D. CONSTRUCTION GRAPHIQUE ---
+            fig = go.Figure()
+            
+            # Triangle Haut-Gauche (ACMG)
+            fig.add_trace(go.Scatter(
+                x=df_viz["Pseudo"], y=df_viz["Gene_symbol"], mode='markers',
+                marker=dict(symbol='triangle-nw', size=24, color=df_viz["ACMG_Class"].map(color_map_acmg), line=dict(width=0)),
+                name="ACMG", hoverinfo='skip'
+            ))
+            
+            # Triangle Bas-Droite (Type)
+            fig.add_trace(go.Scatter(
+                x=df_viz["Pseudo"], y=df_viz["Gene_symbol"], mode='markers',
+                marker=dict(symbol='triangle-se', size=24, color=df_viz["Mut_Cat"].map(color_map_type), line=dict(width=0)),
+                name="Type", hovertemplate='<b>Patient:</b> %{x}<br><b>Gène:</b> %{y}<br><b>Type:</b> %{text}<extra></extra>',
+                text=df_viz["Mut_Cat"] + " (" + df_viz["Variant"] + ")"
+            ))
+
+            # Légendes fantômes
+            for l, c in color_map_acmg.items(): fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(symbol='triangle-nw', size=15, color=c), name=f"ACMG: {l}"))
+            for l, c in color_map_type.items(): fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(symbol='triangle-se', size=15, color=c), name=f"Type: {l}"))
+
+            # --- E. LAYOUT ---
+            fig.update_layout(
+                title=dict(text=f"OncoPrint ({len(df_patho)} variants)", x=0.5),
+                width=calc_width,  # On force la largeur calculée
+                height=calc_height, # On force la hauteur calculée
+                xaxis=dict(
+                    title="Patients", tickangle=-45, 
+                    categoryorder='array', categoryarray=sorted_pats,
+                    showgrid=True, gridcolor='#eeeeee', zeroline=False
+                ),
+                yaxis=dict(
+                    title=None, tickfont=dict(size=14),
+                    categoryorder='array', categoryarray=sorted_genes,
+                    showgrid=True, gridcolor='#eeeeee', zeroline=False
+                ),
+                plot_bgcolor='white',
+                legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center"),
+                # Marges automatiques pour éviter que les labels ne soient coupés
+                margin=dict(l=150, r=50, t=100, b=150) 
+            )
+
+            # Affichage interactif
+            config = {
+                'toImageButtonOptions': {
+                    'format': 'svg', 
+                    'filename': 'OncoPrint_Export',
+                    'height': calc_height, 
+                    'width': calc_width,
+                    'scale': 1.5
+                }
+            }
+            st.plotly_chart(fig, use_container_width=True, config=config)
+
+            # --- F. BOUTON EXPORT PDF DÉDIÉ ---
+            c_exp1, c_exp2 = st.columns([1, 4])
+            with c_exp1:
+                st.write("###")
+                try:
+                    # Tentative de génération du PDF via Python (nécessite kaleido)
+                    pdf_bytes = pio.to_image(fig, format="pdf", width=calc_width, height=calc_height, scale=1)
+                    
+                    st.download_button(
+                        label="📄 Télécharger en PDF",
+                        data=pdf_bytes,
+                        file_name=f"OncoPrint_Full_{datetime.now().strftime('%Y%m%d')}.pdf",
+                        mime="application/pdf",
+                        type="primary"
+                    )
+                except ImportError:
+                    st.error("⚠️ Module 'kaleido' manquant.")
+                    st.info("Pour activer l'export PDF, installez-le : `pip install -U kaleido`")
+                except Exception as e:
+                    st.error(f"Erreur Export : {e}")
+                    
+            with st.expander("Voir les données brutes"):
+                st.dataframe(df_viz)
+
+        else:
+            st.warning("Aucun variant pertinent trouvé.")
+
 if not submitted:
     st.info("👈 Chargez fichier + Lancer.")
