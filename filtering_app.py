@@ -585,7 +585,7 @@ if st.session_state["analysis_done"]:
     k3.metric("Ratio", f"{round(n_fin/n_ini*100, 2) if n_ini>0 else 0}%")
 
    # Onglets
-   tabs = st.tabs([
+    tabs = st.tabs([
         "📋 Tableau", "🔍 Inspecteur", "🧩 Corrélation", "📊 Spectre", 
         "📍 Lollipops", "📈 QC", "🧬 Pathways", "🕸️ PPI", 
         "🧬 Évolution Clonale", "🔥 Matrice", "🏙️ Manhattan", "📊 TMB",
