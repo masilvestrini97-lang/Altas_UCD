@@ -585,19 +585,11 @@ if st.session_state["analysis_done"]:
     k3.metric("Ratio", f"{round(n_fin/n_ini*100, 2) if n_ini>0 else 0}%")
 
    # Onglets
-    tabs = st.tabs([
-        "📋 Tableau", 
-        "🔍 Inspecteur", 
-        "🧩 Corrélation", 
-        "📊 Spectre", 
-        "📍 Lollipops", 
-        "📈 QC", 
-        "🧬 Pathways", 
-        "🕸️ PPI", 
-        "🧬 Évolution Clonale", 
-        "🔥 Matrice",
-        "🏙️ Manhattan", # Nouvel onglet 11
-        "📊 TMB"        # Nouvel onglet 12
+   tabs = st.tabs([
+        "📋 Tableau", "🔍 Inspecteur", "🧩 Corrélation", "📊 Spectre", 
+        "📍 Lollipops", "📈 QC", "🧬 Pathways", "🕸️ PPI", 
+        "🧬 Évolution Clonale", "🔥 Matrice", "🏙️ Manhattan", "📊 TMB",
+        "🏥 Clinique-Génomique"
     ])
 
     # --- TAB 1: AGGRID ---
@@ -1220,6 +1212,140 @@ if st.session_state["analysis_done"]:
                     st.dataframe(tmb_counts.sort_values("TMB_Score", ascending=False))
             else:
                 st.warning("Information 'Pseudo' manquante pour grouper par patient.")
+
+    # --- TAB 13: ANALYSE MIXTE (ACP) ---
+    with tabs[12]:
+        st.subheader("🏥 Analyse Intégrée : Clinique & Génomique")
+        st.info("Cette analyse combine vos variants filtrés avec les métadonnées cliniques pour identifier des groupes de patients similaires (Clustering sur ACP).")
+
+        # 1. Sélection des colonnes cliniques
+        # On exclut les colonnes techniques connues pour ne garder que les potentielles cliniques
+        technical_cols = [
+            "Sample_id", "Gene_symbol", "Variant", "Depth", "Allelic_ratio", "Ref_depth", "Alt_depth",
+            "Feature_id", "Variant_effect", "hgvs.c", "hgvs.p", "Putative_impact", 
+            "1000g_AF", "1000g_EUR_AF", "gnomad_genomes_AF", "gnomad_exomes_AF", "gnomad_exomes_NFE_AF",
+            "Clinvar_significance", "CADD_phred", "Torrent_metric", "Nature", "ligne_coupee",
+            "Ref_depth_total", "Ref_depth_plus", "Ref_depth_minus", "Alt_depth_total", 
+            "Alt_depth_plus", "Alt_depth_minus", "SBR_ref", "SBR_alt", "Pseudo", "gene",
+            "mis_z", "msc_weight", "score_putative", "score_cadd", "score_clinvar", "patho_score",
+            "ACMG_Class", "ACMG_Rank", "MSC_Ref", "MSC_Status", "internal_freq", "link_varsome"
+        ]
+        
+        # Détection automatique des colonnes restantes (supposées cliniques)
+        potential_clinical = [c for c in df_res.columns if c not in technical_cols]
+        
+        c_mix1, c_mix2 = st.columns([1, 3])
+        
+        with c_mix1:
+            st.markdown("**Paramètres**")
+            selected_clinical = st.multiselect(
+                "Variables Cliniques à inclure :", 
+                options=potential_clinical,
+                default=potential_clinical[:5] if len(potential_clinical) > 0 else []
+            )
+            
+            nb_genes_pca = st.slider("Top Gènes à inclure (les plus fréquents)", 5, 50, 20)
+            n_clusters_pca = st.slider("Nombre de Clusters (K-Means)", 2, 8, 3)
+
+        with c_mix2:
+            if "Pseudo" in df_res.columns and selected_clinical:
+                try:
+                    from sklearn.preprocessing import StandardScaler
+                    from sklearn.decomposition import PCA
+                    from sklearn.impute import SimpleImputer
+                    
+                    # --- A. PRÉPARATION GENOMIQUE ---
+                    # On ne garde que les top gènes pour éviter le bruit
+                    top_genes = df_res["Gene_symbol"].value_counts().head(nb_genes_pca).index
+                    df_genomic = df_res[df_res["Gene_symbol"].isin(top_genes)].copy()
+                    
+                    # Pivot : 1 ligne par patient, colonnes = gènes (1 si mutation, 0 sinon)
+                    matrix_gen = df_genomic.pivot_table(
+                        index="Pseudo", 
+                        columns="Gene_symbol", 
+                        aggfunc='size', 
+                        fill_value=0
+                    )
+                    matrix_gen[matrix_gen > 0] = 1 # Binarisation
+                    
+                    # --- B. PRÉPARATION CLINIQUE ---
+                    # On agrège par patient (on prend la première valeur trouvée)
+                    df_clin_agg = df_res.groupby("Pseudo")[selected_clinical].first()
+                    
+                    # Gestion des manquants (Imputation simple)
+                    # Pour les catégories : "Missing"
+                    # Pour les nombres : Moyenne ou 0
+                    cat_cols = df_clin_agg.select_dtypes(include=['object', 'category']).columns
+                    num_cols = df_clin_agg.select_dtypes(include=['number']).columns
+                    
+                    # Imputation
+                    if len(cat_cols) > 0:
+                        df_clin_agg[cat_cols] = df_clin_agg[cat_cols].fillna("Inconnu")
+                    if len(num_cols) > 0:
+                        df_clin_agg[num_cols] = df_clin_agg[num_cols].fillna(0) # On assume 0 si vide (ex: pas de complication)
+                        
+                    # Encodage One-Hot pour les catégories (transforme "Histo_A" en colonne 0/1)
+                    df_clin_encoded = pd.get_dummies(df_clin_agg, columns=cat_cols, drop_first=False)
+                    
+                    # --- C. FUSION ---
+                    # On ne garde que les patients présents dans les deux (Inner Join implicite par index)
+                    final_matrix = matrix_gen.join(df_clin_encoded, how='inner').fillna(0)
+                    
+                    if not final_matrix.empty:
+                        # --- D. ANALYSE (PCA + KMEANS) ---
+                        # Standardisation (Moyenne 0, Ecart-type 1)
+                        scaler = StandardScaler()
+                        X_scaled = scaler.fit_transform(final_matrix)
+                        
+                        # PCA
+                        pca = PCA(n_components=2)
+                        components = pca.fit_transform(X_scaled)
+                        
+                        # Clustering
+                        kmeans = KMeans(n_clusters=n_clusters_pca, random_state=42, n_init=10)
+                        clusters = kmeans.fit_predict(X_scaled)
+                        
+                        # DataFrame pour le plot
+                        df_pca = pd.DataFrame(data=components, columns=['PC1', 'PC2'], index=final_matrix.index)
+                        df_pca['Cluster'] = clusters.astype(str)
+                        
+                        # Ajout d'infos au survol (on remet les données brutes)
+                        df_pca = df_pca.join(df_clin_agg)
+                        
+                        # --- E. VISUALISATION ---
+                        # Calcul de l'inertie (Variance expliquée)
+                        var_exp = pca.explained_variance_ratio_
+                        
+                        fig_pca = px.scatter(
+                            df_pca, 
+                            x='PC1', 
+                            y='PC2',
+                            color='Cluster',
+                            symbol='Cluster',
+                            title=f"Carte des Patients (PCA) - {var_exp[0]:.1%} / {var_exp[1]:.1%} variance",
+                            hover_name=df_pca.index,
+                            hover_data=selected_clinical,
+                            color_discrete_sequence=px.colors.qualitative.Bold,
+                            height=600
+                        )
+                        
+                        fig_pca.update_traces(marker=dict(size=12, line=dict(width=1, color='DarkSlateGrey')))
+                        fig_pca.update_layout(plot_bgcolor='white')
+                        
+                        st.plotly_chart(fig_pca, use_container_width=True)
+                        
+                        st.caption("Les patients proches sur ce graphique partagent des caractéristiques similaires (génétiques ET cliniques).")
+                        
+                        with st.expander("Voir la matrice utilisée pour l'analyse"):
+                            st.dataframe(final_matrix)
+                            
+                    else:
+                        st.warning("Pas assez de données communes entre variants et clinique.")
+                        
+                except Exception as e:
+                    st.error(f"Erreur lors de l'analyse : {e}")
+            else:
+                st.info("Veuillez sélectionner au moins une variable clinique.")
 
 if not submitted:
     st.info("👈 Chargez fichier + Lancer.")
