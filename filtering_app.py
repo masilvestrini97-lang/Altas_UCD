@@ -693,85 +693,78 @@ if st.session_state["analysis_done"]:
                 st.plotly_chart(fig_pat, use_container_width=True)
 
    # --- TAB 3: CORRELATION & STATISTIQUES ---
+   # --- TAB 3: CORRELATION & STATISTIQUES ---
     with tabs[2]:
         st.subheader("🧩 OncoPrint & Analyse Statistique")
         
         if "Pseudo" in df_res.columns and "Gene_symbol" in df_res.columns and not df_res.empty:
-            # A. Visualisation (Heatmap/OncoPrint)
-            view_mode = st.radio("Mode de visualisation", ["Heatmap", "OncoPrint"], horizontal=True)
+            # --- Visualisation existante ---
+            view_mode = st.radio("Mode", ["Heatmap", "OncoPrint"], horizontal=True)
             top_genes_list = df_res["Gene_symbol"].value_counts().head(30).index.tolist()
             df_heat = df_res[df_res["Gene_symbol"].isin(top_genes_list)].copy()
             
-            # (Le code de vos graphiques reste le même ici...)
-            # ... [Code Heatmap/OncoPrint existant] ...
-            # ------------------------------------------------
+            # ... [Ton code Heatmap/Oncoprint ici] ...
 
-            # B. ANALYSE STATISTIQUE (FISHER)
+            # --- ANALYSE DE FISHER ---
             st.markdown("---")
-            st.subheader("🧪 Significativité des Associations (Test de Fisher)")
-            
-            # Préparation de la matrice binaire (Patients x Gènes)
+            st.subheader("🧪 Analyse de significativité")
+
+            # 1. Préparation de la matrice binaire
             matrix_bin = df_res.pivot_table(index="Pseudo", columns="Gene_symbol", aggfunc='size', fill_value=0)
             matrix_bin[matrix_bin > 0] = 1
             
-            n_total = len(matrix_bin) # Nombre total de patients
-            genes = matrix_bin.columns.tolist()
+            # 2. Filtrage des gènes pour l'analyse
+            # On baisse à 1 si tu as peu de données pour "voir" les calculs
+            min_freq_input = st.number_input("Fréquence min. du gène pour test", 1, 10, 2)
+            relevant_genes = [g for g in matrix_bin.columns if matrix_bin[g].sum() >= min_freq_input]
+            
+            st.write(f"📊 Analyse sur **{len(relevant_genes)} gènes** présents chez au moins {min_freq_input} patients.")
             
             stats_results = []
-            
-            # On teste uniquement les gènes avec une certaine fréquence pour éviter le bruit
-            min_freq = 2 
-            relevant_genes = [g for g in genes if matrix_bin[g].sum() >= min_freq]
-
-            with st.spinner("Calcul des p-values..."):
+            if len(relevant_genes) < 2:
+                st.warning("Pas assez de gènes fréquents pour calculer des paires.")
+            else:
+                from scipy.stats import fisher_exact
+                
+                # Proposer de voir même ce qui n'est pas significatif pour débugger
+                show_all = st.checkbox("Afficher TOUTES les paires (même non significatives)", value=False)
+                
+                pair_count = 0
                 for i in range(len(relevant_genes)):
                     for j in range(i + 1, len(relevant_genes)):
                         g1, g2 = relevant_genes[i], relevant_genes[j]
+                        pair_count += 1
                         
-                        # Création de la table de contingence
-                        both = ((matrix_bin[g1] == 1) & (matrix_bin[g2] == 1)).sum()
-                        g1_only = ((matrix_bin[g1] == 1) & (matrix_bin[g2] == 0)).sum()
-                        g2_only = ((matrix_bin[g1] == 0) & (matrix_bin[g2] == 1)).sum()
-                        none = ((matrix_bin[g1] == 0) & (matrix_bin[g2] == 0)).sum()
+                        # Table de contingence
+                        both = int(((matrix_bin[g1] == 1) & (matrix_bin[g2] == 1)).sum())
+                        g1_only = int(((matrix_bin[g1] == 1) & (matrix_bin[g2] == 0)).sum())
+                        g2_only = int(((matrix_bin[g1] == 0) & (matrix_bin[g2] == 1)).sum())
+                        none = int(((matrix_bin[g1] == 0) & (matrix_bin[g2] == 0)).sum())
                         
                         table = [[both, g1_only], [g2_only, none]]
-                        
-                        # Test de Fisher (two-sided)
                         odds_ratio, p_val = fisher_exact(table)
                         
-                        if p_val < 0.05:
+                        if show_all or p_val < 0.05:
                             type_assoc = "Co-occurrence" if odds_ratio > 1 else "Exclusion"
+                            if odds_ratio == 0 and both == 0: type_assoc = "Exclusion" # Cas du zéro
+                            
                             stats_results.append({
-                                "Gène 1": g1,
-                                "Gène 2": g2,
+                                "Paire": f"{g1} / {g2}",
                                 "Type": type_assoc,
-                                "Both": both,
+                                "En Commun": both,
                                 "Seul G1": g1_only,
                                 "Seul G2": g2_only,
-                                "p-value": round(p_val, 4),
-                                "Odds Ratio": round(odds_ratio, 2)
+                                "p-value": p_val,
+                                "OR": odds_ratio
                             })
 
-            if stats_results:
-                df_stats = pd.DataFrame(stats_results).sort_values("p-value")
-                
-                st.write(f"🔍 **{len(df_stats)} associations significatives** détectées ($p < 0.05$):")
-                
-                # Mise en couleur du tableau
-                def color_type(val):
-                    color = '#d9534f' if val == 'Exclusion' else '#5cb85c'
-                    return f'color: {color}; font-weight: bold'
+                st.write(f"🧪 **{pair_count} paires testées.**")
 
-                st.dataframe(df_stats.style.applymap(color_type, subset=['Type']))
-                
-                # Export
-                csv_stats = df_stats.to_csv(index=False).encode('utf-8')
-                st.download_button("📥 Télécharger les statistiques (CSV)", csv_stats, "stats_associations.csv", "text/csv")
-            else:
-                st.info("Aucune association statistiquement significative trouvée avec les paramètres actuels.")
-                
-        else:
-            st.warning("Données insuffisantes pour l'analyse statistique.")
+                if stats_results:
+                    df_stats = pd.DataFrame(stats_results).sort_values("p-value")
+                    st.dataframe(df_stats.style.background_gradient(subset=['p-value'], cmap='viridis_r'))
+                else:
+                    st.info("Aucune paire significative trouvée. Essayez de cocher 'Afficher TOUTES les paires'.")
 
     # --- TAB 4: SPECTRE ---
     with tabs[3]:
