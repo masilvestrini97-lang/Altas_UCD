@@ -7,27 +7,27 @@ import json
 import tempfile
 from datetime import datetime
 
-from scipy.stats import fisher_exact
+# Imports scientifiques
 import numpy as np
 import pandas as pd
+from scipy.stats import fisher_exact, hypergeom
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+
+# Imports Streamlit & Visu
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
-import plotly.io as pio # Nécessaire pour l'export PDF
-from scipy.stats import hypergeom
-
-# --- IMPORTS POUR VISUALISATION & RAPPORT ---
 import matplotlib.pyplot as plt
 import seaborn as sns
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 from fpdf import FPDF
 from streamlit_agraph import agraph, Node, Edge, Config
-from sklearn.cluster import KMeans
 
 # ---------------------------------------
-# 1. CONFIGURATION & DESIGN
+# 1. CONFIGURATION
 # ---------------------------------------
-
 st.set_page_config(page_title="NGS ATLAS Explorer", layout="wide", page_icon="🧬")
 
 MSC_LOCAL_FILENAME = "MSC_CI99_v1.7.txt"
@@ -38,1060 +38,398 @@ def render_custom_header():
     <style>
     .header-container {{
         background-image: linear-gradient(rgba(0, 0, 0, 0.6), rgba(0, 0, 0, 0.6)), url('{HEADER_IMG_URL}');
-        background-size: cover;
-        background-position: center 30%;
-        padding: 50px 20px;
-        border-radius: 15px;
-        text-align: center;
-        margin-bottom: 30px;
-        box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+        background-size: cover; background-position: center 30%; padding: 50px 20px;
+        border-radius: 15px; text-align: center; margin-bottom: 30px; box-shadow: 0 4px 10px rgba(0,0,0,0.2);
     }}
-    .header-title {{
-        color: #8C005F; 
-        font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
-        font-size: 48px;
-        font-weight: 800;
-        text-transform: uppercase;
-        letter-spacing: 2px;
-        text-shadow: 2px 2px 4px #000000;
-        margin: 0;
-    }}
-    .header-subtitle {{
-        color: #f1f1f1;
-        font-size: 18px;
-        font-weight: 300;
-        margin-top: 10px;
-        text-shadow: 1px 1px 2px #000000;
-    }}
+    .header-title {{ color: #8C005F; font-family: sans-serif; font-size: 48px; font-weight: 800; text-transform: uppercase; margin: 0; text-shadow: 2px 2px 4px #000; }}
+    .header-subtitle {{ color: #f1f1f1; font-size: 18px; margin-top: 10px; text-shadow: 1px 1px 2px #000; }}
     </style>
     <div class="header-container">
         <div class="header-title">🧬 NGS ATLAS Explorer</div>
-        <div class="header-subtitle">Dev by Castleman Team</div>
+        <div class="header-subtitle">Castleman Team Analysis Tool</div>
     </div>
     """, unsafe_allow_html=True)
 
-# --- FONCTIONS UTILITAIRES ---
-
+# ---------------------------------------
+# 2. FONCTIONS UTILITAIRES & CHARGEMENT
+# ---------------------------------------
 def clean_text(val):
-    if not isinstance(val, str): return ""
-    return re.sub(r'[^A-Za-z0-9]+', '', val.strip().lower())
+    return re.sub(r'[^A-Za-z0-9]+', '', str(val).strip().lower()) if val else ""
 
 def extract_ref_alt_chr(df):
     if "Variant" in df.columns:
         extracted = df["Variant"].astype(str).str.extract(r'([ACGT]+)[>:/]([ACGT]+)$', flags=re.IGNORECASE)
-        if "Ref" not in df.columns and not extracted[0].isna().all():
-            df["Ref"] = extracted[0].str.upper()
-        if "Alt" not in df.columns and not extracted[1].isna().all():
-            df["Alt"] = extracted[1].str.upper()
+        if "Ref" not in df.columns and not extracted[0].isna().all(): df["Ref"] = extracted[0].str.upper()
+        if "Alt" not in df.columns and not extracted[1].isna().all(): df["Alt"] = extracted[1].str.upper()
         if "Chromosome" not in df.columns:
             df["Chromosome"] = df["Variant"].astype(str).str.split(r'[:_-]', n=1, expand=True)[0]
             df["Chromosome"] = df["Chromosome"].str.replace("chr", "", case=False).str.strip()
     return df
 
 @st.cache_data
-def load_variants(uploaded_file, sep_guess="auto"):
+def load_variants(uploaded_file):
     if uploaded_file is None: return None
-    if sep_guess == "auto":
-        sample = uploaded_file.read(4096).decode("utf-8", errors="ignore")
-        uploaded_file.seek(0)
-        sep = ";" if ";" in sample and "," not in sample else ("\t" if "\t" in sample else ",")
-    else: sep = sep_guess
+    sample = uploaded_file.read(4096).decode("utf-8", errors="ignore")
+    uploaded_file.seek(0)
+    sep = ";" if ";" in sample and "," not in sample else ("\t" if "\t" in sample else ",")
     try:
-        df = pd.read_csv(uploaded_file, sep=sep, dtype=str, on_bad_lines='skip')
-        df = df.replace('"', '', regex=True)
-        df = extract_ref_alt_chr(df)
-        return df
+        df = pd.read_csv(uploaded_file, sep=sep, dtype=str, on_bad_lines='skip').replace('"', '', regex=True)
+        df.columns = df.columns.str.strip() # Nettoyage titres colonnes
+        if "Pseudo" in df.columns: df["Pseudo"] = df["Pseudo"].str.strip() # Nettoyage IDs patients
+        return extract_ref_alt_chr(df)
     except Exception as e:
         st.error(f"Erreur lecture : {e}")
         return None
 
 def make_varsome_link(variant_str):
-    try:
-        v = str(variant_str).replace(">", ":")
-        return f"https://varsome.com/variant/hg19/{v}"
-    except: return ""
-
-@st.cache_data
-def get_string_network(gene_symbol, limit=10):
-    url = "https://string-db.org/api/json/network"
-    params = {"identifiers": gene_symbol, "species": 9606, "limit": limit, "network_type": "functional"}
-    try:
-        response = requests.get(url, params=params, timeout=5)
-        if response.status_code == 200: return response.json()
-    except: return []
-    return []
+    return f"https://varsome.com/variant/hg19/{str(variant_str).replace('>', ':')}" if variant_str else ""
 
 # --- RAPPORT PDF ---
 def create_pdf_report(patient_id, df_variants, user_comments=""):
     class PDF(FPDF):
         def header(self):
             self.set_font('Arial', 'B', 14)
-            self.cell(0, 10, f'Rapport NGS - {patient_id}', 0, 1, 'C')
-            self.ln(2)
+            self.cell(0, 10, f'Rapport NGS - {patient_id}', 0, 1, 'C'); self.ln(2)
         def footer(self):
-            self.set_y(-15)
-            self.set_font('Arial', 'I', 8)
+            self.set_y(-15); self.set_font('Arial', 'I', 8)
             self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
-
-    pdf = PDF(orientation='L', unit='mm', format='A4')
-    pdf.add_page()
     
+    pdf = PDF(orientation='L', unit='mm', format='A4'); pdf.add_page()
     pdf.set_font("Arial", 'B', 10)
     pdf.cell(0, 6, f"Date: {datetime.now().strftime('%Y-%m-%d')} | Variants: {len(df_variants)}", 0, 1)
-    if user_comments:
-        pdf.set_font("Arial", 'I', 10)
-        pdf.multi_cell(0, 6, f"Note: {user_comments}")
+    if user_comments: pdf.set_font("Arial", 'I', 10); pdf.multi_cell(0, 6, f"Note: {user_comments}")
     pdf.ln(5)
-
-    prot_candidates = ["hgvs.p", "HGVSp", "Protein_change", "AA_change", "hgvsp", "p."]
-    found_prot = next((c for c in prot_candidates if c in df_variants.columns), None)
-
-    columns_config = [
-        ("Gene", "Gene_symbol", 25),
-        ("Variant", "Variant", 45),
-        ("Protein", found_prot, 35) if found_prot else ("Effect", "Variant_effect", 35),
-        ("CADD", "CADD_phred", 15),
-        ("MSC", "MSC_Ref", 15),
-        ("ACMG", "ACMG_Class", 35),
-        ("VAF", "Allelic_ratio", 15),
-        ("Depth", "Depth", 15),
-        ("gnomAD", "gnomad_exomes_NFE_AF", 25)
-    ]
-    columns_config = [c for c in columns_config if c is not None]
-
-    pdf.set_font("Arial", 'B', 8)
-    pdf.set_fill_color(240, 240, 240)
-    for label, _, width in columns_config:
-        pdf.cell(width, 8, label, 1, 0, 'C', 1)
+    
+    # Colonnes du rapport
+    cols_config = [("Gene", "Gene_symbol", 25), ("Variant", "Variant", 45), ("ACMG", "ACMG_Class", 35),
+                   ("CADD", "CADD_phred", 15), ("VAF", "Allelic_ratio", 15), ("gnomAD", "gnomad_exomes_NFE_AF", 25)]
+    
+    pdf.set_font("Arial", 'B', 8); pdf.set_fill_color(240, 240, 240)
+    for l, _, w in cols_config: pdf.cell(w, 8, l, 1, 0, 'C', 1)
     pdf.ln()
     
     pdf.set_font("Arial", '', 7)
     for _, row in df_variants.iterrows():
-        for label, col_name, width in columns_config:
-            raw_val = row.get(col_name, "")
-            display_val = str(raw_val)
-            
-            if col_name in ["Allelic_ratio", "CADD_phred", "MSC_Ref"]:
-                try: display_val = str(round(float(raw_val), 2))
+        for _, col, w in cols_config:
+            val = str(row.get(col, ""))
+            if col in ["Allelic_ratio", "CADD_phred"]: 
+                try: val = str(round(float(val), 2))
                 except: pass
-            elif col_name == "gnomad_exomes_NFE_AF":
-                try:
-                    val_float = float(raw_val)
-                    display_val = "<1e-4" if 0 < val_float < 0.0001 else f"{val_float:.4f}"
-                    if val_float == 0: display_val = "0"
-                except: display_val = ""
-
-            max_char = int(width / 1.8)
-            if len(display_val) > max_char: display_val = display_val[:max_char-2] + ".."
-            pdf.cell(width, 8, display_val, 1, 0, 'C')
+            pdf.cell(w, 8, val[:int(w/1.8)], 1, 0, 'C')
         pdf.ln()
-
     return pdf.output(dest='S').encode('latin-1', 'ignore')
 
 # ---------------------------------------
-# 2. LOGIQUE DE FILTRAGE
+# 3. FILTRAGE ET SCORING
 # ---------------------------------------
-
 @st.cache_data
-def apply_filtering_and_scoring(
-    df, allelic_ratio_min, gnomad_max, use_gnomad_filter, 
-    min_depth, min_alt_depth, max_cohort_freq, 
-    msc_file_uploaded_content,
-    genes_exclude, patients_exclude, min_cadd,
-    variant_effect_keep, putative_keep, clinvar_keep, sort_by_column,
-    use_acmg, use_msc_filter_strict,
-    acmg_keep_list 
-):
-    logs = [] 
-    df = df.copy()
-    initial_total = len(df)
-    logs.append({"Etape": "1. Import Brut", "Restants": initial_total, "Perdus": 0})
-
-    if "Gene_symbol" not in df.columns:
-        return None, 0, 0, "Colonne 'Gene_symbol' manquante.", []
-
+def apply_filtering_and_scoring(df, vaf_min, gnomad_max, use_gnomad, min_dp, min_alt, max_freq, msc_content, genes_ex, pats_ex, min_cadd, v_eff, p_imp, clin_sig, sort_col, use_acmg, use_msc_strict, acmg_keep):
+    logs = []; initial = len(df); df = df.copy()
+    if "Gene_symbol" not in df.columns: return None, 0, 0, "No Gene_symbol column", []
+    
     df["Gene_symbol"] = df["Gene_symbol"].str.upper().str.replace(" ", "")
-    df = extract_ref_alt_chr(df)
-
-    for col in ["Variant_effect", "Putative_impact", "Clinvar_significance"]:
-        if col in df.columns: df[col] = df[col].fillna("Non Renseigné")
-
-    if "Pseudo" in df.columns and "Variant" in df.columns:
-        tot = df["Pseudo"].nunique()
-        cts = df.groupby("Variant")["Pseudo"].nunique()
-        df["internal_freq"] = df["Variant"].map(cts) / tot
-    else: df["internal_freq"] = 0.0
-
-    cols_num = ["gnomad_exomes_NFE_AF", "CADD_phred", "Allelic_ratio", "Depth", "Alt_depth_total"]
-    for c in cols_num:
+    
+    # Conversion numérique
+    for c in ["gnomad_exomes_NFE_AF", "CADD_phred", "Allelic_ratio", "Depth"]:
         if c in df.columns: df[c] = pd.to_numeric(df[c], errors="coerce")
     
-    if "Alt_depth_total" not in df.columns and "Alt_depth" in df.columns:
-        df["Alt_depth_total"] = df["Alt_depth"].astype(str).str.split(',').str[0].str.split(' ').str[0]
-        df["Alt_depth_total"] = pd.to_numeric(df["Alt_depth_total"], errors='coerce').fillna(0)
+    # Calcul Fréquence Interne
+    if "Pseudo" in df.columns and "Variant" in df.columns:
+        df["Pseudo"] = df["Pseudo"].astype(str).str.strip()
+        cts = df.groupby("Variant")["Pseudo"].nunique()
+        df["internal_freq"] = df["Variant"].map(cts) / df["Pseudo"].nunique()
+    else: df["internal_freq"] = 0.0
 
-    # --- FILTRES ---
-    last_count = len(df)
-    if "Depth" in df.columns: df = df[df["Depth"] >= min_depth]
-    if "Alt_depth_total" in df.columns: df = df[df["Alt_depth_total"] >= min_alt_depth]
-    if "Allelic_ratio" in df.columns: df = df[df["Allelic_ratio"] >= allelic_ratio_min]
-    if max_cohort_freq < 1.0: df = df[df["internal_freq"] <= max_cohort_freq]
-    if genes_exclude: df = df[~df["Gene_symbol"].isin(genes_exclude)]
-    if patients_exclude and "Pseudo" in df.columns: df = df[~df["Pseudo"].isin(patients_exclude)]
-    logs.append({"Etape": "2. Qualité & Cohorte", "Restants": len(df), "Perdus": last_count - len(df)}); last_count = len(df)
-
-    if use_gnomad_filter and "gnomad_exomes_NFE_AF" in df.columns:
+    # Filtres Numériques
+    if "Depth" in df.columns: df = df[df["Depth"] >= min_dp]
+    if "Allelic_ratio" in df.columns: df = df[df["Allelic_ratio"] >= vaf_min]
+    if max_freq < 1.0: df = df[df["internal_freq"] <= max_freq]
+    if use_gnomad and "gnomad_exomes_NFE_AF" in df.columns:
         df = df[(df["gnomad_exomes_NFE_AF"].isna()) | (df["gnomad_exomes_NFE_AF"] <= gnomad_max)]
-    logs.append({"Etape": "3. gnomAD", "Restants": len(df), "Perdus": last_count - len(df)}); last_count = len(df)
-
-    if variant_effect_keep and "Variant_effect" in df.columns: df = df[df["Variant_effect"].isin(variant_effect_keep)]
-    if putative_keep and "Putative_impact" in df.columns: df = df[df["Putative_impact"].isin(putative_keep)]
-    if clinvar_keep and "Clinvar_significance" in df.columns: df = df[df["Clinvar_significance"].isin(clinvar_keep)]
-    if min_cadd is not None and min_cadd > 0 and "CADD_phred" in df.columns:
+    if min_cadd > 0 and "CADD_phred" in df.columns:
         df = df[(df["CADD_phred"].isna()) | (df["CADD_phred"] >= min_cadd)]
-    logs.append({"Etape": "4. Catégories & CADD", "Restants": len(df), "Perdus": last_count - len(df)}); last_count = len(df)
 
-    # --- LIENS ---
-    if "Variant" in df.columns: df["link_varsome"] = df["Variant"].apply(make_varsome_link)
-    else: df["link_varsome"] = ""
+    # Filtres Listes
+    if genes_ex: df = df[~df["Gene_symbol"].isin(genes_ex)]
+    if pats_ex and "Pseudo" in df.columns: df = df[~df["Pseudo"].isin(pats_ex)]
+    if v_eff and "Variant_effect" in df.columns: df = df[df["Variant_effect"].isin(v_eff)]
+    if clin_sig and "Clinvar_significance" in df.columns: df = df[df["Clinvar_significance"].isin(clin_sig)]
 
-    # --- MSC ---
-    df["MSC_Ref"] = np.nan
-    df["MSC_Status"] = "N/A"
-
+    # MSC Scoring
+    df["MSC_Ref"] = np.nan; df["MSC_Status"] = "N/A"
     msc_df = None
-    if os.path.exists(MSC_LOCAL_FILENAME):
-        try: msc_df = pd.read_csv(MSC_LOCAL_FILENAME, sep="\t", dtype=str)
+    if msc_content:
+        try: msc_df = pd.read_csv(io.StringIO(msc_content), sep="\t", dtype=str)
         except: pass
-    if msc_file_uploaded_content is not None:
-        try: msc_df = pd.read_csv(io.StringIO(msc_file_uploaded_content), sep="\t", dtype=str)
-        except:
-             try: msc_df = pd.read_csv(io.StringIO(msc_file_uploaded_content), sep=",", dtype=str)
-             except: pass
-    
+    elif os.path.exists(MSC_LOCAL_FILENAME):
+         try: msc_df = pd.read_csv(MSC_LOCAL_FILENAME, sep="\t", dtype=str)
+         except: pass
+         
     if msc_df is not None:
         try:
             msc_df.columns = [c.strip() for c in msc_df.columns]
-            if "Gene" in msc_df.columns and "MSC" in msc_df.columns:
-                msc_clean = msc_df[["Gene", "MSC"]].copy()
-                msc_clean["Gene"] = msc_clean["Gene"].str.upper().str.strip()
-                msc_clean["MSC"] = pd.to_numeric(msc_clean["MSC"], errors='coerce')
-                msc_clean = msc_clean.groupby("Gene")["MSC"].max().reset_index()
-                
-                df = df.merge(msc_clean, left_on="Gene_symbol", right_on="Gene", how="left")
-                df["MSC_Ref"] = df["MSC"]
-                
-                if "CADD_phred" in df.columns:
-                    cond_has_values = (df["CADD_phred"].notna()) & (df["MSC_Ref"].notna())
-                    cond_low = cond_has_values & (df["CADD_phred"] < df["MSC_Ref"])
-                    df.loc[cond_low, "MSC_Status"] = "Background"
-                    df.loc[~cond_low & cond_has_values, "MSC_Status"] = "High Impact"
+            msc_clean = msc_df.groupby("Gene")["MSC"].max().reset_index()
+            msc_clean["MSC"] = pd.to_numeric(msc_clean["MSC"], errors='coerce')
+            df = df.merge(msc_clean, left_on="Gene_symbol", right_on="Gene", how="left")
+            df["MSC_Ref"] = df["MSC"]
+            if "CADD_phred" in df.columns:
+                cond = (df["CADD_phred"].notna()) & (df["MSC_Ref"].notna())
+                df.loc[cond & (df["CADD_phred"] < df["MSC_Ref"]), "MSC_Status"] = "Background"
+                df.loc[cond & (df["CADD_phred"] >= df["MSC_Ref"]), "MSC_Status"] = "High Impact"
+                if use_msc_strict: df = df[~(cond & (df["CADD_phred"] < df["MSC_Ref"]))]
+        except: pass
 
-                    if use_msc_filter_strict:
-                        df = df[~cond_low]
-                        logs.append({"Etape": "5. Filtre MSC Strict", "Restants": len(df), "Perdus": last_count - len(df)})
-                        last_count = len(df)
-        except Exception as e:
-            logs.append({"Etape": "Erreur MSC", "Info": str(e)})
-
-    # --- ACMG ---
+    # ACMG Scoring
     if use_acmg:
-        def compute_acmg_class(row):
-            eff = str(row.get("Variant_effect", "")).lower()
-            pvs1 = any(x in eff for x in ["stopgained", "frameshift", "splice_acceptor", "splice_donor"])
-            af = row.get("gnomad_exomes_NFE_AF", np.nan)
-            pm2 = pd.isna(af) or (af < 0.0001)
-            cadd = row.get("CADD_phred", 0)
-            pp3 = cadd >= 25
-            clv = str(row.get("Clinvar_significance", "")).lower()
-            pp5 = "pathogenic" in clv and "conflict" not in clv
-            benign_clinvar = "benign" in clv and "pathogenic" not in clv
-            ba1 = (af > 0.05) if not pd.isna(af) else False
-            
-            if ba1 or benign_clinvar: return "Benign", 0
+        def get_acmg(row):
             score = 0
-            if pvs1: score += 4
-            if pm2: score += 2
-            if pp5: score += 2
-            if pp3: score += 1
+            eff = str(row.get("Variant_effect", "")).lower()
+            if any(x in eff for x in ["stop", "frame", "splice"]): score += 4
+            af = row.get("gnomad_exomes_NFE_AF", np.nan)
+            if pd.isna(af) or af < 0.0001: score += 2
+            cadd = row.get("CADD_phred", 0)
+            if cadd >= 25: score += 1
+            clin = str(row.get("Clinvar_significance", "")).lower()
+            if "pathogenic" in clin and "conflict" not in clin: score += 2
             
             if score >= 5: return "Pathogenic", 4
-            elif score >= 3: return "Likely Pathogenic", 3
-            elif score >= 1: return "VUS", 2
-            else: return "Likely Benign", 1
-
-        acmg_res = df.apply(compute_acmg_class, axis=1, result_type='expand')
-        df["ACMG_Class"] = acmg_res[0]
-        df["ACMG_Rank"] = acmg_res[1]
+            if score >= 3: return "Likely Pathogenic", 3
+            if score >= 1: return "VUS", 2
+            return "Likely Benign", 1
+            
+        res_acmg = df.apply(get_acmg, axis=1, result_type='expand')
+        df["ACMG_Class"] = res_acmg[0]; df["ACMG_Rank"] = res_acmg[1]
     else:
-        df["ACMG_Class"] = "Non calculé"
-        df["ACMG_Rank"] = 0
+        df["ACMG_Class"] = "Non calculé"; df["ACMG_Rank"] = 0
 
-    # --- FILTRE ACMG GLOBAL ---
-    if acmg_keep_list:
-        last_count = len(df)
-        df = df[df["ACMG_Class"].isin(acmg_keep_list)]
-        logs.append({"Etape": "6. Filtre ACMG Global", "Restants": len(df), "Perdus": last_count - len(df)})
-
-    # --- TRI ---
-    if sort_by_column == "Classification ACMG (Priorité)": 
-        df = df.sort_values("ACMG_Rank", ascending=False)
-    elif sort_by_column == "Score CADD (Décroissant)": 
-        if "CADD_phred" in df.columns: df = df.sort_values("CADD_phred", ascending=False)
-    elif sort_by_column == "Patient (A-Z)": 
-        if "Pseudo" in df.columns: df = df.sort_values("Pseudo", ascending=True)
-
-    return df, initial_total, len(df), None, logs
-
-# ---------------------------------------
-# 3. ANALYSE PATHWAYS
-# ---------------------------------------
-
-def load_local_pathways(directory="."):
-    pathways = {}
-    gmt_files = glob.glob(os.path.join(directory, "*.gmt"))
-    for fpath in gmt_files:
-        try:
-            with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    parts = line.strip().split("\t")
-                    if len(parts) >= 3:
-                        pw = parts[0].strip()
-                        genes = [g.strip().upper() for g in parts[2:] if g.strip()]
-                        if pw and genes:
-                            if pw not in pathways: pathways[pw] = []
-                            pathways[pw].extend(genes)
-        except: pass
+    if acmg_keep: df = df[df["ACMG_Class"].isin(acmg_keep)]
     
-    for k in pathways: pathways[k] = list(set(pathways[k]))
-    return pathways, [os.path.basename(f) for f in gmt_files]
-
-@st.cache_data
-def compute_enrichment(df, pathway_genes):
-    universe = sorted({g for gl in pathway_genes.values() for g in gl})
-    N = len(universe)
-    mutated = sorted(set(df["Gene_symbol"].unique()) & set(universe))
-    n = len(mutated)
-    if N == 0 or n == 0: return pd.DataFrame()
-
-    rows = []
-    for pw, genes in pathway_genes.items():
-        M = len(genes)
-        overlap = set(mutated) & set(genes)
-        k = len(overlap)
-        if k > 0:
-            pval = hypergeom.sf(k - 1, N, M, n)
-            rows.append({"pathway": pw, "p_value": pval, "k_overlap": k, "genes": ",".join(overlap)})
-
-    df_res = pd.DataFrame(rows)
-    if not df_res.empty:
-        df_res = df_res.sort_values("p_value")
-        m = len(df_res)
-        df_res["rank"] = np.arange(1, m + 1)
-        df_res["FDR"] = np.clip(np.minimum.accumulate(((df_res["p_value"] * m) / df_res["rank"])[::-1])[::-1], 0, 1)
-        df_res["minus_log10_FDR"] = -np.log10(df_res["FDR"] + 1e-300)
-    return df_res
+    # Tri
+    if sort_col == "Classification ACMG (Priorité)": df = df.sort_values("ACMG_Rank", ascending=False)
+    elif sort_col == "Score CADD (Décroissant)": 
+        if "CADD_phred" in df.columns: df = df.sort_values("CADD_phred", ascending=False)
+    
+    if "Variant" in df.columns: df["link_varsome"] = df["Variant"].apply(make_varsome_link)
+    
+    return df, initial, len(df), None, logs
 
 # ---------------------------------------
-# 4. INTERFACE
+# 4. INTERFACE PRINCIPALE
 # ---------------------------------------
-
 render_custom_header()
 
-if "analysis_done" not in st.session_state:
+if "analysis_done" not in st.session_state: 
     st.session_state["analysis_done"] = False
     st.session_state["df_res"] = None
-    st.session_state["kpis"] = (0, 0)
-    st.session_state["logs"] = []
-
-# ==========================================================
-# PARTIE SIDEBAR
-# ==========================================================
 
 with st.sidebar:
     st.header("1. Données")
-    uploaded_file = st.file_uploader("Fichier Variants", type=["csv", "tsv", "txt"])
+    uploaded_file = st.file_uploader("Fichier Variants (CSV/TSV)", type=["csv", "tsv", "txt"])
     
-    df_raw = None
+    # Options dynamiques
     v_opts, p_opts, c_opts = [], [], []
-
-    # Calcul des options si le fichier est là
+    df_raw = None
     if uploaded_file:
         df_raw = load_variants(uploaded_file)
         if df_raw is not None:
-            if "Variant_effect" in df_raw.columns: 
-                v_opts = sorted(df_raw["Variant_effect"].fillna("Non Renseigné").unique())
-            if "Putative_impact" in df_raw.columns: 
-                p_opts = sorted(df_raw["Putative_impact"].fillna("Non Renseigné").unique())
-            if "Clinvar_significance" in df_raw.columns: 
-                c_opts = sorted(df_raw["Clinvar_significance"].fillna("Non Renseigné").unique())
+             if "Variant_effect" in df_raw.columns: v_opts = sorted(df_raw["Variant_effect"].dropna().unique())
+             if "Clinvar_significance" in df_raw.columns: c_opts = sorted(df_raw["Clinvar_significance"].dropna().unique())
 
-            if "sel_var" not in st.session_state:
-                st.session_state["sel_var"] = v_opts
-            else:
-                st.session_state["sel_var"] = [x for x in st.session_state["sel_var"] if x in v_opts]
-                if not st.session_state["sel_var"]: st.session_state["sel_var"] = v_opts
-
-            if "sel_put" not in st.session_state:
-                st.session_state["sel_put"] = p_opts
-            else:
-                st.session_state["sel_put"] = [x for x in st.session_state["sel_put"] if x in p_opts]
-                if not st.session_state["sel_put"]: st.session_state["sel_put"] = p_opts
-
-            if "sel_clin" not in st.session_state:
-                st.session_state["sel_clin"] = c_opts
-            else:
-                st.session_state["sel_clin"] = [x for x in st.session_state["sel_clin"] if x in c_opts]
-                if not st.session_state["sel_clin"]: st.session_state["sel_clin"] = c_opts
-
-    # ------------------------------------------------------------
-    # GESTIONNAIRE DE CONFIGURATION (JSON)
-    # ------------------------------------------------------------
-    st.header("0. Configuration")
-    uploaded_config = st.file_uploader("📂 Charger stratégie (JSON)", type=["json"], key="config_uploader")
-    
-    if uploaded_config is not None:
-        try:
-            if st.button("🔄 APPLIQUER LA CONFIGURATION"):
-                data = json.load(uploaded_config)
-                
-                for key, value in data.items():
-                    if key == "sel_var" and isinstance(value, list):
-                        valid_vals = [x for x in value if x in v_opts]
-                        st.session_state[key] = valid_vals
-                    elif key == "sel_put" and isinstance(value, list):
-                        valid_vals = [x for x in value if x in p_opts]
-                        st.session_state[key] = valid_vals
-                    elif key == "sel_clin" and isinstance(value, list):
-                        valid_vals = [x for x in value if x in c_opts]
-                        st.session_state[key] = valid_vals
-                    else:
-                        st.session_state[key] = value
-                
-                st.success("Configuration chargée !")
-                st.rerun()
-                
-        except Exception as e:
-            st.error(f"Erreur config: {e}")
-
-    # Sauvegarde (toujours disponible)
-    keys_to_save = ["sort_choice", "min_dp", "allelic_min", "min_ad", "max_cohort_freq",
-                    "gnomad_max", "min_cadd_val", "use_acmg", "use_gnomad", 
-                    "acmg_to_keep", "genes_ex", "pseudo_ex", 
-                    "sel_var", "sel_put", "sel_clin", "use_msc_strict"]
-    
-    current_config = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
-    if current_config:
-        st.download_button("💾 Sauvegarder Config", json.dumps(current_config, indent=4), "ngs_filter.json", "application/json")
-    
-    st.markdown("---")
-
-    # ------------------------------------------------------------
-    # FORMULAIRE
-    # ------------------------------------------------------------
-    with st.form("params"):
-        st.header("2. Paramètres")
-        sort_choice = st.selectbox("Tri initial", ["Classification ACMG (Priorité)", "Score CADD (Décroissant)", "Patient (A-Z)"], key="sort_choice")
+    # Formulaire de filtres
+    with st.form("params_form"):
+        st.header("2. Filtres")
+        sort_choice = st.selectbox("Tri", ["Classification ACMG (Priorité)", "Score CADD (Décroissant)"])
         
         c1, c2 = st.columns(2)
-        with c1:
-            min_dp = st.number_input("Depth Min", 0, 10000, 50, key="min_dp")
-            allelic_min = st.number_input("VAF Min", 0.0, 1.0, 0.02, key="allelic_min")
-        with c2:
-            min_ad = st.number_input("Alt Depth Min", 0, 1000, 5, key="min_ad")
-            max_cohort_freq = st.slider("Max Freq Cohorte", 0.0, 1.0, 1.0, 0.05, key="max_cohort_freq")
-
-        c3, c4 = st.columns(2)
-        with c3:
-            gnomad_max = st.number_input("gnomAD Max", 0.0, 1.0, 0.001, format="%.4f", key="gnomad_max")
-            min_cadd_val = st.number_input("CADD Min (0=all)", 0.0, 60.0, 0.0, key="min_cadd_val")
-        with c4:
-            use_acmg = st.checkbox("Calculer ACMG", value=True, key="use_acmg")
-            use_gnomad = st.checkbox("Filtre gnomAD", True, key="use_gnomad")
+        min_dp = c1.number_input("Prof. Min (Depth)", 0, 1000, 50)
+        vaf_min = c2.number_input("VAF Min (0-1)", 0.0, 1.0, 0.02)
+        gnomad_max = st.number_input("gnomAD Max AF", 0.0, 1.0, 0.001, format="%.4f")
+        min_cadd = st.number_input("CADD Phred Min", 0.0, 60.0, 0.0)
+        
+        acmg_keep = st.multiselect("ACMG Keep", ["Pathogenic", "Likely Pathogenic", "VUS"], default=["Pathogenic", "Likely Pathogenic", "VUS"])
+        
+        with st.expander("Filtres Avancés"):
+            sel_var = st.multiselect("Effet Variant", v_opts)
+            sel_clin = st.multiselect("ClinVar", c_opts)
+            genes_ex = st.text_area("Exclure Gènes", "TTN, MUC16, KMT2C")
+            pats_ex = st.text_area("Exclure Patients", "")
             
-            acmg_options = ["Pathogenic", "Likely Pathogenic", "VUS", "Likely Benign", "Benign", "Non calculé"]
-            acmg_to_keep = st.multiselect("Filtre Global ACMG", options=acmg_options, default=acmg_options, key="acmg_to_keep")
+            msc_file = st.file_uploader("Fichier MSC (Optionnel)", type=["txt", "tsv"])
+            use_msc_strict = st.checkbox("Exclure si CADD < MSC", False)
 
-        with st.expander("Avancé & Filtres MSC"):
-            sel_var = st.multiselect("Effet", options=v_opts, key="sel_var")
-            sel_put = st.multiselect("Impact", options=p_opts, key="sel_put")
-            sel_clin = st.multiselect("ClinVar", options=c_opts, key="sel_clin")
-            
-            genes_ex = st.text_area("Exclure Gènes", "KMT2C, CHEK2, TTN, MUC16", key="genes_ex")
-            pseudo_ex = st.text_area("Exclure Patients", "", key="pseudo_ex")
-            
-            st.markdown("---")
-            st.markdown("**🛡️ MSC Filter**")
-            
-            has_local_msc = os.path.exists(MSC_LOCAL_FILENAME)
-            msc_file_upload = None
-            if has_local_msc:
-                st.success(f"MSC local : {MSC_LOCAL_FILENAME}")
-            else:
-                st.warning("MSC local non trouvé.")
-                msc_file_upload = st.file_uploader("Upload MSC", type=["txt", "tsv", "csv"])
-
-            use_msc_filter_strict = st.checkbox("Exclure si CADD < MSC", value=False, key="use_msc_strict")
-
-        st.header("3. Pathways")
         submitted = st.form_submit_button("🚀 LANCER L'ANALYSE")
 
 if submitted and df_raw is not None:
-    g_list = [x.strip().upper() for x in genes_ex.split(",") if x.strip()]
-    p_list = [x.strip() for x in pseudo_ex.split(",") if x.strip()]
+    g_ex_list = [x.strip().upper() for x in genes_ex.split(",") if x.strip()]
+    p_ex_list = [x.strip() for x in pats_ex.split(",") if x.strip()]
+    msc_txt = msc_file.read().decode("utf-8") if msc_file else None
     
-    msc_content = None
-    if msc_file_upload is not None:
-        msc_content = msc_file_upload.read().decode("utf-8")
-
     res, ini, fin, err, logs = apply_filtering_and_scoring(
-        df_raw, allelic_min, gnomad_max, use_gnomad, 
-        min_dp, min_ad, max_cohort_freq, 
-        msc_content,
-        g_list, p_list, 
-        min_cadd_val, sel_var, sel_put, sel_clin, sort_choice, use_acmg,
-        use_msc_filter_strict,
-        acmg_to_keep 
+        df_raw, vaf_min, gnomad_max, True, min_dp, 5, 1.0, msc_txt, 
+        g_ex_list, p_ex_list, min_cadd, sel_var, [], sel_clin, sort_choice, True, use_msc_strict, acmg_keep
     )
-
+    
     if err: st.error(err)
     else:
         st.session_state["analysis_done"] = True
         st.session_state["df_res"] = res
-        st.session_state["kpis"] = (ini, fin)
-        st.session_state["logs"] = logs
-        
-        user_pathways, file_names = load_local_pathways()
-        st.session_state["gmt_files"] = file_names
-        if user_pathways:
-            st.session_state["df_enr"] = compute_enrichment(res, user_pathways)
-        else:
-            st.session_state["df_enr"] = pd.DataFrame()
+        st.session_state["kpi"] = (ini, fin)
 
 # ---------------------------------------
-# 5. AFFICHAGE DES RESULTATS
+# 5. RÉSULTATS ET ONGLETS
 # ---------------------------------------
-
 if st.session_state["analysis_done"]:
     df_res = st.session_state["df_res"]
-    n_ini, n_fin = st.session_state["kpis"]
-    logs = st.session_state["logs"]
-    df_enr = st.session_state.get("df_enr", pd.DataFrame())
-    acmg_active = st.session_state.get("use_acmg", False)
-
+    ini, fin = st.session_state["kpi"]
+    
     # KPI
     k1, k2, k3 = st.columns(3)
-    k1.metric("Initial", n_ini)
-    k2.metric("Final", n_fin)
-    k3.metric("Ratio", f"{round(n_fin/n_ini*100, 2) if n_ini>0 else 0}%")
-
-   # Onglets
-    tabs = st.tabs([
-        "📋 Tableau", "🔍 Inspecteur", "🧩 Corrélation", "📊 Spectre", 
-        "📍 Lollipops", "📈 QC", "🧬 Pathways", "🕸️ PPI", 
-        "🧬 Évolution Clonale", "🔥 Matrice", "🏙️ Manhattan", "📊 TMB",
-        "🏥 Clinique-Génomique"
-    ])
-
-    # --- TAB 1: AGGRID ---
-    with tabs[0]:
-        st.subheader("📋 Liste des variants filtrés")
-        
-        df_to_show = df_res.copy() 
-        
-        # Filtre local d'affichage ACMG
-        if "ACMG_Class" in df_to_show.columns:
-            all_acmg_classes = sorted(df_to_show["ACMG_Class"].astype(str).unique())
-            selected_acmg = st.multiselect("Filtrer l'affichage :", options=all_acmg_classes, default=all_acmg_classes)
-            df_to_show = df_to_show[df_to_show["ACMG_Class"].isin(selected_acmg)]
-            st.caption(f"Affichage de {len(df_to_show)} variants sur {len(df_res)} (Total filtré).")
-
-        if "link_varsome" in df_to_show.columns:
-            df_to_show["Varsome_HTML"] = df_to_show["link_varsome"].apply(lambda x: f'<a href="{x}" target="_blank">🔗</a>' if x else "")
-        
-        cols_base = ["Pseudo", "Gene_symbol", "Variant", "ACMG_Class", "CADD_phred", "MSC_Ref", "MSC_Status", "Allelic_ratio","Varsome_HTML"]
-        existing = [c for c in cols_base if c in df_to_show.columns]
-        others = [c for c in df_to_show.columns if c not in existing and c not in ["link_varsome", "link_gnomad", "MSC", "ACMG_Rank"]]
-        
-        df_display = df_to_show[existing + others].copy()
-
-        gb = GridOptionsBuilder.from_dataframe(df_display)
-        gb.configure_pagination(paginationPageSize=20)
-        gb.configure_selection('multiple', use_checkbox=True)
-        gb.configure_default_column(resizable=True, filterable=True, sortable=True, minWidth=150)
-        gb.configure_column("Variant", minWidth=200)
-
-        acmg_style = JsCode("""
-        function(params) {
-            if (params.value == 'Pathogenic') return {'color': 'white', 'backgroundColor': '#d9534f'};
-            if (params.value == 'Likely Pathogenic') return {'color': 'black', 'backgroundColor': '#f0ad4e'};
-            if (params.value == 'VUS') return {'color': 'black', 'backgroundColor': '#5bc0de'};
-            return null;
-        };
-        """)
-        gb.configure_column("ACMG_Class", cellStyle=acmg_style)
-
-        msc_style = JsCode("""
-        function(params) {
-            if (params.value == 'High Impact') return {'color': '#a94442', 'backgroundColor': '#f2dede', 'fontWeight': 'bold'};
-            if (params.value == 'Background') return {'color': '#999', 'fontStyle': 'italic'};
-            return null;
-        };
-        """)
-        gb.configure_column("MSC_Status", cellStyle=msc_style)
-        
-        if "Varsome_HTML" in df_display.columns: gb.configure_column("Varsome_HTML", headerName="Lien", cellRenderer="html")
-        if "link_varsome" in df_display.columns: gb.configure_column("link_varsome", hide=True)
-
-        grid_response = AgGrid(df_display, gridOptions=gb.build(), allow_unsafe_jscode=True, height=600, fit_columns_on_grid_load=False)
-        
-        df_selected = pd.DataFrame(grid_response['selected_rows'])
-        if df_selected.empty: df_selected = df_display
-
-        st.markdown("---")
-        c_rep1, c_rep2 = st.columns([3, 1])
-        with c_rep1:
-            st.info(f"**{len(df_selected)} variants** pour le rapport/export.")
-            user_comment = st.text_area("Commentaire clinique :")
-        with c_rep2:
-            st.write("##")
-            pat_id = df_selected["Pseudo"].unique()[0] if "Pseudo" in df_selected.columns and len(df_selected["Pseudo"].unique()) == 1 else "Multi"
-            
-            # --- BOUTON PDF (EXISTANT) ---
-            try:
-                pdf_bytes = create_pdf_report(pat_id, df_selected, user_comment)
-                st.download_button("📥 PDF Report", pdf_bytes, f"Rapport_{pat_id}.pdf", "application/pdf", type="primary")
-            except Exception as e: st.error(f"Erreur PDF: {e}")
-
-            # --- BOUTON CSV (NOUVEAU) ---
-            st.write("##") # Espaceur
-            csv_exp = df_selected.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Export CSV",
-                data=csv_exp,
-                file_name=f"Export_Variants_{pat_id}_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv",
-            )
-
-    # --- TAB 2: INSPECTEUR ---
-    with tabs[1]:
-        st.subheader("🔍 Inspecteur Clinique (ACMG)")
-        if "Pseudo" in df_res.columns:
-            sel_pat = st.selectbox("Patient", sorted(df_res["Pseudo"].unique()))
-            if sel_pat:
-                df_pat = df_res[df_res["Pseudo"] == sel_pat].copy()
-                df_pat = df_pat.sort_values(["ACMG_Rank", "CADD_phred"], ascending=False).head(20)
-                
-                fig_pat = px.bar(
-                    df_pat, x="CADD_phred", y="Gene_symbol", orientation='h',
-                    color="ACMG_Class", 
-                    title=f"Top Variants {sel_pat}",
-                    hover_data=["Variant", "MSC_Status"],
-                    color_discrete_map={"Pathogenic": "#d9534f", "Likely Pathogenic": "#f0ad4e", "VUS": "#5bc0de", "Likely Benign": "#5cb85c", "Benign": "green"}
-                )
-                fig_pat.update_layout(yaxis={'categoryorder':'total ascending'})
-                st.plotly_chart(fig_pat, use_container_width=True)
-
-  # --- TAB 3: CORRELATION & STATISTIQUES (VERSION DEBUG) ---
-    with tabs[2]:
-        st.subheader("🧩 OncoPrint & Analyse Statistique")
-        
-        if "Pseudo" in df_res.columns and "Gene_symbol" in df_res.columns and not df_res.empty:
-            # 1. VISUALISATION EXISTANTE
-            view_mode = st.radio("Mode de visualisation", ["Heatmap", "OncoPrint"], horizontal=True)
-            top_genes_list = df_res["Gene_symbol"].value_counts().head(30).index.tolist()
-            df_heat = df_res[df_res["Gene_symbol"].isin(top_genes_list)].copy()
-            
-            if view_mode == "Heatmap":
-                matrix = df_heat.pivot_table(index="Pseudo", columns="Gene_symbol", aggfunc='size', fill_value=0)
-                matrix[matrix > 0] = 1 
-                co_occ = matrix.T.dot(matrix)
-                st.plotly_chart(px.imshow(co_occ, text_auto=True, color_continuous_scale="Viridis", height=700), use_container_width=True)
-            else: 
-                def get_effect_score(eff):
-                    e = str(eff).lower()
-                    if any(x in e for x in ["stop", "frameshift", "nonsense"]): return 3
-                    if "splice" in e: return 2
-                    if "missense" in e: return 1
-                    return 0.5
-                df_heat["Effet_Code"] = df_heat["Variant_effect"].apply(get_effect_score)
-                matrix_onco = df_heat.pivot_table(index="Gene_symbol", columns="Pseudo", values="Effet_Code", aggfunc='max', fill_value=0)
-                colors = [[0,"white"],[0.05,"white"],[0.05,"lightgrey"],[0.25,"lightgrey"],[0.25,"blue"],[0.5,"blue"],[0.5,"orange"],[0.8,"orange"],[0.8,"red"],[1,"red"]]
-                st.plotly_chart(go.Figure(data=go.Heatmap(z=matrix_onco.values, x=matrix_onco.columns, y=matrix_onco.index, colorscale=colors, showscale=False, zmin=0, zmax=3), layout=dict(height=700)), use_container_width=True)
-
-            # 2. ANALYSE STATISTIQUE DE FISHER
-            st.markdown("---")
-            st.subheader("🧪 Analyse de significativité (Fisher)")
-
-            # Préparation de la matrice binaire (Indispensable)
-            matrix_bin = df_res.pivot_table(index="Pseudo", columns="Gene_symbol", aggfunc='size', fill_value=0)
-            matrix_bin[matrix_bin > 0] = 1
-            
-            # Paramètres de debug
-            c_db1, c_db2 = st.columns(2)
-            with c_db1:
-                min_freq_stat = st.number_input("Fréquence min. pour tester un gène", 1, 20, 1) # On met 1 par défaut pour tout voir
-            with c_db2:
-                p_threshold = st.slider("Seuil de P-value à afficher", 0.0, 1.0, 1.0) # On met 1.0 pour tout afficher
-
-            relevant_genes = [g for g in matrix_bin.columns if matrix_bin[g].sum() >= min_freq_stat]
-            
-            st.info(f"📊 **Statut :** {len(relevant_genes)} gènes sélectionnés pour le test (sur {len(matrix_bin.columns)} total).")
-
-            if len(relevant_genes) < 2:
-                st.warning("⚠️ Pas assez de gènes pour comparer des paires. Baissez la 'Fréquence min' ou modifiez vos filtres dans la sidebar.")
-            else:
-                from scipy.stats import fisher_exact
-                stats_results = []
-                
-                with st.spinner("Calcul des p-values..."):
-                    for i in range(len(relevant_genes)):
-                        for j in range(i + 1, len(relevant_genes)):
-                            g1, g2 = relevant_genes[i], relevant_genes[j]
-                            
-                            # Table de contingence
-                            both = int(((matrix_bin[g1] == 1) & (matrix_bin[g2] == 1)).sum())
-                            g1_only = int(((matrix_bin[g1] == 1) & (matrix_bin[g2] == 0)).sum())
-                            g2_only = int(((matrix_bin[g1] == 0) & (matrix_bin[g2] == 1)).sum())
-                            none = int(((matrix_bin[g1] == 0) & (matrix_bin[g2] == 0)).sum())
-                            
-                            table = [[both, g1_only], [g2_only, none]]
-                            odds_ratio, p_val = fisher_exact(table)
-                            
-                            if p_val <= p_threshold:
-                                type_assoc = "Co-occurrence" if odds_ratio > 1 else "Exclusion"
-                                if both == 0: type_assoc = "Exclusion"
-                                
-                                stats_results.append({
-                                    "Paire de Gènes": f"{g1} + {g2}",
-                                    "Type": type_assoc,
-                                    "En Commun": both,
-                                    "P-value": p_val,
-                                    "Odds Ratio": round(odds_ratio, 2)
-                                })
-
-                if stats_results:
-                    df_stats = pd.DataFrame(stats_results).sort_values("P-value")
-                    st.write(f"✅ {len(df_stats)} paires analysées.")
-                    
-                    # Style pour repérer les vrais résultats significatifs (< 0.05)
-                    def highlight_sig(val):
-                        return 'background-color: #dff0d8' if val < 0.05 else ''
-                    
-                    st.dataframe(df_stats.style.applymap(highlight_sig, subset=['P-value']))
-                else:
-                    st.error("Aucune paire ne correspond aux critères.")
-        else:
-            st.warning("Données insuffisantes ou colonne 'Pseudo' manquante.")
-    # --- TAB 4: SPECTRE ---
-    with tabs[3]:
-        st.subheader("📊 Spectre Mutationnel")
-        df_mut = extract_ref_alt_chr(df_res.copy())
-        if "Ref" in df_mut.columns and "Alt" in df_mut.columns:
-            df_mut["mutation"] = df_mut["Ref"] + ">" + df_mut["Alt"]
-            trans_map = {'G>T': 'C>A', 'G>C': 'C>G', 'G>A': 'C>T', 'A>T': 'T>A', 'A>T': 'T>A', 'A>G': 'T>C', 'A>C': 'T>G'}
-            df_mut["canon_mut"] = df_mut["mutation"].apply(lambda x: trans_map.get(x, x))
-            valid_snvs = ['C>A', 'C>G', 'C>T', 'T>A', 'T>C', 'T>G']
-            df_mut = df_mut[df_mut["canon_mut"].isin(valid_snvs)]
-            if not df_mut.empty:
-                counts = df_mut.groupby(["Pseudo", "canon_mut"]).size().reset_index(name="Count")
-                colors = {'C>A': '#1ebff0', 'C>G': '#050708', 'C>T': '#e62725', 'T>A': '#cbcacb', 'T>C': '#a1cf64', 'T>G': '#edc8c5'}
-                st.plotly_chart(px.bar(counts, x="Pseudo", y="Count", color="canon_mut", color_discrete_map=colors), use_container_width=True)
-            else: st.info("Aucun SNV standard.")
-        else: st.warning("Impossible d'extraire Ref/Alt.")
-
-    # --- TAB 5: LOLLIPOPS ---
-    with tabs[4]:
-        st.subheader("📍 Lollipop Plot")
-        prot_cols = ["hgvs.p", "HGVSp", "Protein_change", "AA_change", "hgvsp"]
-        found_col = next((c for c in prot_cols if c in df_res.columns), None)
-        if found_col:
-            sel_gene_lol = st.selectbox("Gène", sorted(df_res["Gene_symbol"].unique()))
-            if sel_gene_lol:
-                df_lol = df_res[df_res["Gene_symbol"] == sel_gene_lol].copy()
-                df_lol["AA_pos"] = pd.to_numeric(df_lol[found_col].astype(str).str.extract(r'(\d+)')[0], errors="coerce")
-                df_lol = df_lol.dropna(subset=["AA_pos", "CADD_phred"])
-                if not df_lol.empty:
-                    fig_lol = px.scatter(df_lol, x="AA_pos", y="CADD_phred", color="ACMG_Class", size="CADD_phred", hover_data=["Pseudo", found_col], title=f"{sel_gene_lol}")
-                    if "MSC_Ref" in df_lol.columns: fig_lol.add_hline(y=df_lol["MSC_Ref"].iloc[0], line_dash="dash", line_color="red")
-                    for _, row in df_lol.iterrows(): fig_lol.add_shape(type="line", x0=row["AA_pos"], y0=0, x1=row["AA_pos"], y1=row["CADD_phred"], line=dict(color="grey", width=1))
-                    st.plotly_chart(fig_lol, use_container_width=True)
-
-    # --- TAB 6: QC ---
-    with tabs[5]: st.plotly_chart(px.scatter(df_res, x="Depth", y="Allelic_ratio", color="ACMG_Class", log_x=True))
-
-    # --- TAB 7: PATHWAYS ---
-    with tabs[6]:
-        if not df_enr.empty and "minus_log10_FDR" in df_enr.columns:
-            st.plotly_chart(px.bar(df_enr.sort_values("FDR").head(20), x="minus_log10_FDR", y="pathway", orientation='h', color="k_overlap"), use_container_width=True)
-            st.dataframe(df_enr)
-        else: st.info("Aucun enrichissement significatif.")
-
-    # --- TAB 8: PPI ---
-    with tabs[7]:
-        st.subheader("🕸️ Réseau STRING")
-        all_genes = sorted(df_res["Gene_symbol"].unique())
-        if all_genes:
-            c_ppi1, c_ppi2 = st.columns([1, 3])
-            with c_ppi1:
-                selected_gene_ppi = st.selectbox("Gène :", all_genes)
-                nb_partners = st.slider("Partenaires", 5, 20, 10)
-            with c_ppi2:
-                if selected_gene_ppi:
-                    network = get_string_network(selected_gene_ppi, limit=nb_partners)
-                    if network:
-                        nodes, edges, added = [], [], set()
-                        nodes.append(Node(id=selected_gene_ppi, label=selected_gene_ppi, size=25, color="#d9534f", shape="dot"))
-                        added.add(selected_gene_ppi)
-                        for i in network:
-                            try:
-                                ga, gb, s = i.get("preferredName_A").upper(), i.get("preferredName_B").upper(), i.get("score", 0)
-                                if s < 0.4: continue
-                                if ga not in added: nodes.append(Node(id=ga, label=ga, size=15, color="#5bc0de")); added.add(ga)
-                                if gb not in added: nodes.append(Node(id=gb, label=gb, size=15, color="#5bc0de")); added.add(gb)
-                                edges.append(Edge(source=ga, target=gb, width=s*2))
-                            except: pass
-                        agraph(nodes=nodes, edges=edges, config=Config(width=700, height=500, directed=False, physics=True))
-                    else: st.warning("Pas d'interactions.")
+    k1.metric("Total", ini); k2.metric("Retenus", fin); k3.metric("Filtre %", f"{round(fin/ini*100,1)}%")
     
-    # --- TAB 9: EVOLUTION CLONALE ---
-    with tabs[8]:
-        st.subheader("🧬 Analyse de l'Architecture Clonale")
-        if "Pseudo" in df_res.columns and "Allelic_ratio" in df_res.columns:
-            c_sel1, c_sel2 = st.columns([1, 3])
-            with c_sel1:
-                patients_list = sorted(df_res["Pseudo"].astype(str).unique())
-                sel_pat_clon = st.selectbox("Sélectionner un Patient :", patients_list)
-            
-            n_clusters_def = 3 
-            
-            if sel_pat_clon:
-                df_clon = df_res[df_res["Pseudo"] == sel_pat_clon].copy()
-                df_clon = df_clon.dropna(subset=["Allelic_ratio"])
-                
-                col_c1, col_c2 = st.columns([1, 3])
-                with col_c1:
-                    n_clusters = st.slider("Nombre de clones", 1, 5, n_clusters_def, key="slider_clon_indiv")
-                    st.info(f"Variants : {len(df_clon)}")
-                
-                with col_c2:
-                    if len(df_clon) < 3:
-                        st.warning("Pas assez de variants (<3).")
-                    else:
-                        try:
-                            X = df_clon[["Allelic_ratio"]].values
-                            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-                            df_clon["Cluster_ID"] = kmeans.fit_predict(X)
-                            
-                            centroids = df_clon.groupby("Cluster_ID")["Allelic_ratio"].mean().sort_values().index
-                            cluster_map = {old_id: f"C{i+1}" for i, old_id in enumerate(centroids)}
-                            df_clon["Cluster_Label"] = df_clon["Cluster_ID"].map(cluster_map)
-                            
-                            fig_clon = px.histogram(
-                                df_clon, x="Allelic_ratio", color="Cluster_Label", 
-                                nbins=30, marginal="rug", opacity=0.7, barmode="overlay",
-                                title=f"Architecture - {sel_pat_clon}",
-                                color_discrete_sequence=px.colors.qualitative.G10
-                            )
-                            fig_clon.update_layout(xaxis_range=[0, 1.05])
-                            st.plotly_chart(fig_clon, use_container_width=True)
-                        except Exception as e: st.error(f"Erreur : {e}")
+    tabs = st.tabs(["📋 Tableau", "🧩 Corrélation", "🧬 Clonale", "🔥 Matrice", "🏙️ Manhattan", "📊 TMB", "🏥 Clinique"])
 
+    # --- TAB 1: TABLEAU ---
+    with tabs[0]:
+        gb = GridOptionsBuilder.from_dataframe(df_res[["Pseudo", "Gene_symbol", "Variant", "ACMG_Class", "CADD_phred", "Allelic_ratio", "MSC_Status"]])
+        gb.configure_selection('multiple', use_checkbox=True)
+        gb.configure_pagination(paginationPageSize=20)
+        grid = AgGrid(df_res, gridOptions=gb.build(), height=500, fit_columns_on_grid_load=False)
+        
+        sel_rows = pd.DataFrame(grid['selected_rows'])
+        if not sel_rows.empty:
+            st.write("---")
+            if st.button("📄 Générer PDF Rapport"):
+                pdf_val = create_pdf_report("Selection", sel_rows)
+                st.download_button("📥 Télécharger PDF", pdf_val, "rapport.pdf", "application/pdf")
+
+    # --- TAB 2: CORRELATION (FISHER) ---
+    with tabs[1]:
+        st.subheader("🧩 Analyse Statistique des Co-occurrences")
+        if "Pseudo" in df_res.columns:
+            # 1. Heatmap Visuelle
+            top_genes = df_res["Gene_symbol"].value_counts().head(30).index
+            df_heat = df_res[df_res["Gene_symbol"].isin(top_genes)]
+            mat = df_heat.pivot_table(index="Pseudo", columns="Gene_symbol", aggfunc='size', fill_value=0)
+            mat[mat>0]=1
+            st.plotly_chart(px.imshow(mat.T.dot(mat), color_continuous_scale="Viridis", height=600))
+            
+            # 2. Test de Fisher (Corrigé)
             st.markdown("---")
-            st.subheader("📄 Rapport PDF Global")
-            if st.button("Générer le PDF Global"):
-                class PDFReport(FPDF):
-                    def header(self):
-                        self.set_font('Arial', 'B', 10)
-                        self.cell(0, 10, 'Atlas Clonal Analysis Report', 0, 1, 'R')
-                    def footer(self):
-                        self.set_y(-15)
-                        self.set_font('Arial', 'I', 8)
-                        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
-
-                pdf = PDFReport()
-                progress_bar = st.progress(0)
-                with tempfile.TemporaryDirectory() as tmp_dir:
-                    total_pats = len(patients_list)
-                    for idx, pat in enumerate(patients_list):
-                        progress_bar.progress((idx + 1) / total_pats)
-                        d_temp = df_res[df_res["Pseudo"] == pat].copy().dropna(subset=["Allelic_ratio"])
-                        if len(d_temp) >= 3:
-                            try:
-                                km = KMeans(n_clusters=3, random_state=42, n_init=10)
-                                d_temp["Cluster_ID"] = km.fit_predict(d_temp[["Allelic_ratio"]].values)
-                                cents = d_temp.groupby("Cluster_ID")["Allelic_ratio"].mean().sort_values().index
-                                cmap = {oid: f"C{i+1}" for i, oid in enumerate(cents)}
-                                d_temp["Cluster_Label"] = d_temp["Cluster_ID"].map(cmap)
-                                
-                                plt.figure(figsize=(10, 5))
-                                sns.histplot(data=d_temp, x="Allelic_ratio", hue="Cluster_Label", bins=30, kde=True, palette="viridis", element="step")
-                                plt.title(f"Patient: {pat} - Architecture Clonale")
-                                plt.xlim(0, 1.05)
-                                img_path = os.path.join(tmp_dir, f"{clean_text(pat)}.png")
-                                plt.savefig(img_path, dpi=100, bbox_inches='tight')
-                                plt.close()
-
-                                pdf.add_page()
-                                pdf.set_font("Arial", 'B', 16)
-                                pdf.cell(0, 10, f"Patient : {pat}", 0, 1, 'L')
-                                pdf.image(img_path, x=10, y=30, w=190)
-                                pdf.set_y(130)
-                                pdf.set_font("Arial", 'B', 10)
-                                pdf.cell(0, 10, "Tableau des Variants (Top 15 par VAF)", 0, 1)
-                                cols = [("Gene", 25), ("Variant", 50), ("VAF", 20), ("Clone", 20), ("ACMG", 40)]
-                                pdf.set_fill_color(220, 220, 220)
-                                for c_name, c_w in cols: pdf.cell(c_w, 8, c_name, 1, 0, 'C', 1)
-                                pdf.ln()
-                                pdf.set_font("Arial", '', 9)
-                                d_table = d_temp.sort_values(["Cluster_Label", "Allelic_ratio"], ascending=[True, False]).head(15)
-                                for _, row in d_table.iterrows():
-                                    pdf.cell(25, 7, str(row.get("Gene_symbol", ""))[:10], 1)
-                                    pdf.cell(50, 7, str(row.get("Variant", ""))[:25], 1)
-                                    pdf.cell(20, 7, f"{row.get('Allelic_ratio', 0):.2f}", 1, 0, 'C')
-                                    pdf.cell(20, 7, str(row.get("Cluster_Label", "")), 1, 0, 'C')
-                                    pdf.cell(40, 7, str(row.get("ACMG_Class", ""))[:20], 1)
-                                    pdf.ln()
-                            except: pass
-                pdf_bytes = pdf.output(dest='S').encode('latin-1', 'ignore')
-                st.download_button(label="📥 Télécharger le Rapport PDF", data=pdf_bytes, file_name="Rapport_Clonal_Global.pdf", mime="application/pdf")
-                progress_bar.empty()
-        else: st.warning("Données insuffisantes.")
-
-    # --- TAB 10: PATHOGENIC MATRIX ---
-    with tabs[9]:
-        st.subheader("🔥 Matrice 'OncoPrint' (ACMG + Type Mutation)")
-        df_patho = df_res[df_res["ACMG_Class"].isin(["Pathogenic", "Likely Pathogenic"])].copy()
-        if "Pseudo" in df_patho.columns and "Gene_symbol" in df_patho.columns and not df_patho.empty:
-            df_patho["Severity_Score"] = df_patho["ACMG_Class"].map({"Pathogenic": 2, "Likely Pathogenic": 1})
-            matrix_temp = df_patho.pivot_table(index="Gene_symbol", columns="Pseudo", values="Severity_Score", aggfunc='max', fill_value=0)
-            sorted_genes = (matrix_temp > 0).sum(axis=1).sort_values(ascending=True).index.tolist()
-            sorted_pats = (matrix_temp > 0).sum(axis=0).sort_values(ascending=False).index.tolist()
+            st.write("🧪 **Test de Fisher (Significativité)**")
             
-            def get_mutation_category(eff):
-                e = str(eff).lower()
-                if any(x in e for x in ["stop", "frameshift", "nonsense", "splice_acceptor", "splice_donor"]): return "Truncating"
-                if "missense" in e: return "Missense"
-                if "splice" in e: return "Splice"
-                return "Other"
-
-            df_patho["Mut_Cat"] = df_patho["Variant_effect"].apply(get_mutation_category)
-            color_map_acmg = {"Pathogenic": "#d9534f", "Likely Pathogenic": "#f0ad4e"}
-            color_map_type = {"Truncating": "#2c3e50", "Missense": "#3498db", "Splice": "#27ae60", "Other": "#95a5a6"}
-            df_viz = df_patho.sort_values(["Severity_Score", "Mut_Cat"], ascending=False).drop_duplicates(subset=["Pseudo", "Gene_symbol"])
+            # Filtre de fréquence pour le test
+            min_freq = st.number_input("Min patients par gène", 1, 50, 2)
+            relevant_genes = [g for g in mat.columns if mat[g].sum() >= min_freq]
             
-            calc_width = max(800, len(sorted_pats) * 35 + 300) 
-            calc_height = max(600, len(sorted_genes) * 35 + 250)
+            # Limite de sécurité (Top 50 gènes max pour éviter le freeze)
+            if len(relevant_genes) > 50:
+                st.warning("Trop de gènes (>50). Analyse limitée aux 50 plus fréquents.")
+                relevant_genes = mat[relevant_genes].sum().sort_values(ascending=False).head(50).index.tolist()
             
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=df_viz["Pseudo"], y=df_viz["Gene_symbol"], mode='markers', marker=dict(symbol='triangle-nw', size=24, color=df_viz["ACMG_Class"].map(color_map_acmg))))
-            fig.add_trace(go.Scatter(x=df_viz["Pseudo"], y=df_viz["Gene_symbol"], mode='markers', marker=dict(symbol='triangle-se', size=24, color=df_viz["Mut_Cat"].map(color_map_type)), text=df_viz["Mut_Cat"]))
-
-            fig.update_layout(width=calc_width, height=calc_height, xaxis=dict(categoryorder='array', categoryarray=sorted_pats), yaxis=dict(categoryorder='array', categoryarray=sorted_genes))
-            st.plotly_chart(fig, use_container_width=True)
-        else: st.warning("Aucun variant pertinent trouvé.")
-
-    # --- TAB 11: MANHATTAN PLOT ---
-    with tabs[10]:
-        st.subheader("🏙️ Manhattan Plot")
-        df_man = df_res.copy()
-        if "Chromosome" in df_man.columns and "CADD_phred" in df_man.columns:
-            df_man["CADD_phred"] = pd.to_numeric(df_man["CADD_phred"], errors="coerce")
-            df_man = df_man.dropna(subset=["CADD_phred"])
-            if not df_man.empty:
-                def sort_chrom(c):
-                    c = str(c).replace("chr", "").upper().strip()
-                    if c.isdigit(): return int(c)
-                    return 23 if c=="X" else (24 if c=="Y" else (25 if c in ["M","MT"] else 26))
-                df_man["Chr_Num"] = df_man["Chromosome"].apply(sort_chrom)
-                df_man = df_man.sort_values("Chr_Num")
-                df_man["Color_Group"] = (df_man["Chr_Num"] % 2).astype(str)
-                fig_man = px.scatter(df_man, x="Chromosome", y="CADD_phred", color="Color_Group", size="CADD_phred", color_discrete_sequence=["#3c4e68", "#5b8cbe"])
-                fig_man.add_hline(y=20, line_dash="dash", line_color="red")
-                st.plotly_chart(fig_man, use_container_width=True)
-
-    # --- TAB 12: TMB ANALYSIS ---
-    with tabs[11]:
-        st.subheader("📊 Tumor Mutational Burden (TMB)")
-        c_tmb1, c_tmb2 = st.columns([1, 3])
-        with c_tmb1:
-            panel_size_mb = st.number_input("Taille du Panel (Mb)", 0.1, 3000.0, 38.0)
-            tmb_threshold = st.slider("Seuil TMB High", 0, 50, 10)
-        with c_tmb2:
-            if "Pseudo" in df_res.columns:
-                tmb_counts = df_res.groupby("Pseudo")["Variant"].count().reset_index()
-                tmb_counts["TMB_Score"] = tmb_counts["Variant"] / panel_size_mb
-                tmb_counts["Status"] = tmb_counts["TMB_Score"].apply(lambda x: "TMB-High" if x >= tmb_threshold else "TMB-Low")
-                fig_tmb = px.bar(tmb_counts, x="Pseudo", y="TMB_Score", color="Status", color_discrete_map={"TMB-High": "#d9534f", "TMB-Low": "#5bc0de"})
-                st.plotly_chart(fig_tmb, use_container_width=True)
-
-    # --- TAB 13: ANALYSE MIXTE (CORRIGÉE) ---
-    with tabs[12]:
-        st.subheader("🏥 Analyse Intégrée : Clinique & Génomique")
-        st.info("Cette analyse combine vos métadonnées cliniques avec la présence de variants via une PCA.")
-
-        technical_cols = [
-            "Sample_id", "Gene_symbol", "Variant", "Depth", "Allelic_ratio", "Ref_depth", "Alt_depth",
-            "Feature_id", "Variant_effect", "hgvs.c", "hgvs.p", "Putative_impact", 
-            "1000g_AF", "1000g_EUR_AF", "gnomad_genomes_AF", "gnomad_exomes_AF", "gnomad_exomes_NFE_AF",
-            "Clinvar_significance", "CADD_phred", "Torrent_metric", "Nature", "ligne_coupee",
-            "Ref_depth_total", "Ref_depth_plus", "Ref_depth_minus", "Alt_depth_total", 
-            "Alt_depth_plus", "Alt_depth_minus", "SBR_ref", "SBR_alt", "Pseudo", "gene",
-            "mis_z", "msc_weight", "score_putative", "score_cadd", "score_clinvar", "patho_score",
-            "ACMG_Class", "ACMG_Rank", "MSC_Ref", "MSC_Status", "internal_freq", "link_varsome", "Varsome_HTML"
-        ]
-        
-        potential_clinical = [c for c in df_res.columns if c not in technical_cols]
-        
-        if not potential_clinical:
-            st.warning("Aucune colonne clinique (métadonnées) détectée.")
-        else:
-            c_mix1, c_mix2 = st.columns([1, 3])
-            with c_mix1:
-                selected_clinical = st.multiselect("Variables Cliniques :", options=potential_clinical, default=potential_clinical[:3] if potential_clinical else [])
-                nb_genes_pca = st.slider("Top Gènes", 5, 100, 30)
-                n_clusters_pca = st.slider("Groupes K-Means", 2, 6, 3)
-
-            with c_mix2:
-                if "Pseudo" in df_res.columns and selected_clinical:
-                    try:
-                        from sklearn.preprocessing import StandardScaler
-                        from sklearn.decomposition import PCA
+            st.info(f"Analyse prête sur {len(relevant_genes)} gènes.")
+            
+            if st.button("▶️ LANCER LE CALCUL STATISTIQUE"):
+                res_fisher = []
+                prog = st.progress(0); count = 0
+                tot = (len(relevant_genes)*(len(relevant_genes)-1))//2
+                
+                for i in range(len(relevant_genes)):
+                    for j in range(i+1, len(relevant_genes)):
+                        g1, g2 = relevant_genes[i], relevant_genes[j]
+                        both = ((mat[g1]==1)&(mat[g2]==1)).sum()
+                        g1_only = ((mat[g1]==1)&(mat[g2]==0)).sum()
+                        g2_only = ((mat[g1]==0)&(mat[g2]==1)).sum()
+                        none = ((mat[g1]==0)&(mat[g2]==0)).sum()
                         
-                        # 1. Alignement des patients
-                        all_pats = sorted(df_res["Pseudo"].unique())
+                        _, p = fisher_exact([[both, g1_only], [g2_only, none]])
+                        if p < 0.05: res_fisher.append({"Paire": f"{g1}/{g2}", "Co-occ": both, "p-value": round(p,5)})
                         
-                        # 2. Matrice Génomique
-                        top_genes = df_res["Gene_symbol"].value_counts().head(nb_genes_pca).index
-                        df_gen = df_res[df_res["Gene_symbol"].isin(top_genes)]
-                        matrix_gen = df_gen.pivot_table(index="Pseudo", columns="Gene_symbol", aggfunc='size', fill_value=0)
-                        matrix_gen = matrix_gen.reindex(all_pats, fill_value=0)
-                        matrix_gen[matrix_gen > 0] = 1
+                        count += 1
+                        if tot > 0: prog.progress(min(count/tot, 1.0))
+                
+                prog.empty()
+                if res_fisher:
+                    st.dataframe(pd.DataFrame(res_fisher).sort_values("p-value"))
+                else:
+                    st.success("Aucune paire significative (p < 0.05).")
 
-                        # 3. Matrice Clinique
-                        df_clin_sub = df_res.groupby("Pseudo")[selected_clinical].first().reindex(all_pats)
-                        df_num = df_clin_sub.select_dtypes(include=[np.number]).fillna(0)
-                        df_cat = df_clin_sub.select_dtypes(exclude=[np.number]).fillna("N/A")
-                        df_clin_final = pd.concat([df_num, pd.get_dummies(df_cat, drop_first=True)], axis=1) if not df_cat.empty else df_num
+    # --- TAB 3: CLONALE ---
+    with tabs[2]:
+        st.subheader("🧬 Architecture Clonale")
+        pat_list = sorted(df_res["Pseudo"].unique())
+        sel_pat = st.selectbox("Patient", pat_list)
+        d_clon = df_res[df_res["Pseudo"] == sel_pat].dropna(subset=["Allelic_ratio"])
+        
+        if len(d_clon) >= 3:
+            try:
+                km = KMeans(n_clusters=3, n_init=10).fit(d_clon[["Allelic_ratio"]])
+                d_clon["Cluster"] = km.labels_.astype(str)
+                st.plotly_chart(px.histogram(d_clon, x="Allelic_ratio", color="Cluster", nbins=40, title=f"VAF Distribution - {sel_pat}"))
+            except: st.error("Erreur K-Means")
+        else: st.warning("Pas assez de variants (<3) pour ce patient.")
 
-                        # 4. Fusion et Nettoyage de variance
-                        full_matrix = pd.concat([matrix_gen, df_clin_final], axis=1)
-                        full_matrix = full_matrix.loc[:, (full_matrix != full_matrix.iloc[0]).any()]
+    # --- TAB 4: MATRICE ---
+    with tabs[3]:
+        st.subheader("🔥 OncoPrint Simulé")
+        top_g = df_res["Gene_symbol"].value_counts().head(25).index
+        d_viz = df_res[df_res["Gene_symbol"].isin(top_g)]
+        
+        # Scoring sévérité pour couleur
+        d_viz["Score"] = d_viz["ACMG_Class"].map({"Pathogenic":3, "Likely Pathogenic":2, "VUS":1}).fillna(0)
+        mat_viz = d_viz.pivot_table(index="Gene_symbol", columns="Pseudo", values="Score", aggfunc='max', fill_value=0)
+        
+        st.plotly_chart(px.imshow(mat_viz, color_continuous_scale="Reds", height=700))
 
-                        if full_matrix.shape[1] >= 2:
-                            X_scaled = StandardScaler().fit_transform(full_matrix)
-                            pca = PCA(n_components=2)
-                            coords = pca.fit_transform(X_scaled)
-                            clusters = KMeans(n_clusters=n_clusters_pca, random_state=42, n_init=10).fit_predict(X_scaled)
-                            
-                            df_viz = pd.DataFrame(coords, columns=['PC1', 'PC2'], index=all_pats)
-                            df_viz['Cluster'] = [f"Groupe {c+1}" for c in clusters]
-                            df_viz = pd.concat([df_viz, df_clin_sub], axis=1)
-                            
-                            fig_pca = px.scatter(df_viz, x='PC1', y='PC2', color='Cluster', hover_name=df_viz.index, hover_data=selected_clinical, title="PCA Génomique + Clinique")
-                            st.plotly_chart(fig_pca, use_container_width=True)
-                        else: st.error("Pas assez de variabilité pour la PCA.")
-                    except Exception as e: st.error(f"Erreur PCA : {e}")
+    # --- TAB 5: MANHATTAN ---
+    with tabs[4]:
+        df_man = df_res.dropna(subset=["CADD_phred", "Chromosome"])
+        if not df_man.empty:
+            st.plotly_chart(px.scatter(df_man, x="Chromosome", y="CADD_phred", color="ACMG_Class", hover_name="Gene_symbol"))
 
-if not submitted:
-    st.info("👈 Chargez un fichier et lancez l'analyse via la barre latérale.")
+    # --- TAB 6: TMB ---
+    with tabs[5]:
+        panel_size = st.number_input("Taille Panel (Mb)", 0.1, 100.0, 38.0)
+        tmb = df_res.groupby("Pseudo")["Variant"].count() / panel_size
+        st.plotly_chart(px.bar(tmb, title="TMB (Mutations / Mb)"))
+
+    # --- TAB 7: CLINIQUE ---
+    with tabs[6]:
+        st.subheader("🏥 PCA Clinique & Génomique")
+        tech_cols = ["Pseudo", "Gene_symbol", "Variant", "CADD_phred", "Allelic_ratio", "ACMG_Class", "ACMG_Rank", "Depth"]
+        clin_cols = [c for c in df_res.columns if c not in tech_cols]
+        
+        if clin_cols:
+            sel_clin = st.multiselect("Variables Cliniques", clin_cols, default=clin_cols[:2] if len(clin_cols)>2 else clin_cols)
+            
+            if st.button("Lancer PCA Intégrée") and sel_clin:
+                # Alignement Strict
+                all_pats = sorted(df_res["Pseudo"].unique())
+                
+                # 1. Genomique (Top 30 gènes)
+                top30 = df_res["Gene_symbol"].value_counts().head(30).index
+                df_g = df_res[df_res["Gene_symbol"].isin(top30)]
+                mat_g = df_g.pivot_table(index="Pseudo", columns="Gene_symbol", aggfunc='size', fill_value=0).reindex(all_pats, fill_value=0)
+                mat_g[mat_g>0]=1 # Binaire
+                
+                # 2. Clinique
+                df_c = df_res.groupby("Pseudo")[sel_clin].first().reindex(all_pats)
+                # Encodage (One-Hot pour texte, 0 pour NaN chiffres)
+                df_num = df_c.select_dtypes(include=np.number).fillna(0)
+                df_str = df_c.select_dtypes(exclude=np.number).fillna("NA")
+                df_c_enc = pd.concat([df_num, pd.get_dummies(df_str, drop_first=True)], axis=1)
+                
+                # 3. Fusion & Clean Variance Nulle
+                full = pd.concat([mat_g, df_c_enc], axis=1)
+                full = full.loc[:, (full != full.iloc[0]).any()] # Suppr colonnes constantes
+                
+                if full.shape[1] > 1:
+                    X = StandardScaler().fit_transform(full)
+                    coords = PCA(n_components=2).fit_transform(X)
+                    
+                    df_pca = pd.DataFrame(coords, columns=["PC1", "PC2"], index=all_pats)
+                    # Cluster rapide pour couleur
+                    df_pca["Cluster"] = KMeans(n_clusters=3, n_init=10).fit_predict(X).astype(str)
+                    
+                    st.plotly_chart(px.scatter(df_pca, x="PC1", y="PC2", color="Cluster", hover_name=df_pca.index, title="PCA Mixte"))
+                else: st.error("Pas assez de variance pour PCA.")
+        else: st.warning("Pas de colonnes cliniques trouvées.")
