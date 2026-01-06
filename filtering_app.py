@@ -302,78 +302,76 @@ if st.session_state["analysis_done"]:
                 pdf_val = create_pdf_report("Selection", sel_rows)
                 st.download_button("📥 Télécharger PDF", pdf_val, "rapport.pdf", "application/pdf")
 
-    # --- TAB 2: CORRELATION (FISHER) ---
-    with tabs[1]:
-        st.subheader("🧩 Co-occurrences & Statistiques (Mode Debug)")
+    # --- TAB 3: CORRELATION (Index 2) ---
+    with tabs[2]:
+        st.subheader("🧩 OncoPrint & Analyse Statistique")
         
-        # 1. Vérification des données
-        if "Pseudo" not in df_res.columns or "Gene_symbol" not in df_res.columns:
-            st.error("Colonnes 'Pseudo' ou 'Gene_symbol' manquantes.")
-        else:
-            # 2. Préparation Matrice Binaire
-            # On force le type string pour éviter les erreurs de type
-            df_res["Pseudo"] = df_res["Pseudo"].astype(str)
-            df_res["Gene_symbol"] = df_res["Gene_symbol"].astype(str)
+        # Nettoyage préventif
+        if "Pseudo" in df_res.columns: df_res["Pseudo"] = df_res["Pseudo"].astype(str)
+        if "Gene_symbol" in df_res.columns: df_res["Gene_symbol"] = df_res["Gene_symbol"].astype(str)
+
+        if "Pseudo" in df_res.columns and "Gene_symbol" in df_res.columns and not df_res.empty:
             
-            # Création de la matrice (1 = muté, 0 = non muté)
+            # --- A. VISUALISATION HEATMAP ---
+            top_genes_list = df_res["Gene_symbol"].value_counts().head(30).index.tolist()
+            df_heat = df_res[df_res["Gene_symbol"].isin(top_genes_list)].copy()
+            
+            # Matrice simple pour affichage
+            matrix_viz = df_heat.pivot_table(index="Pseudo", columns="Gene_symbol", aggfunc='size', fill_value=0)
+            matrix_viz[matrix_viz > 0] = 1 
+            
+            if not matrix_viz.empty:
+                co_occ = matrix_viz.T.dot(matrix_viz)
+                st.plotly_chart(px.imshow(co_occ, text_auto=True, color_continuous_scale="Viridis", height=700), use_container_width=True)
+            else:
+                st.info("Pas assez de données pour la Heatmap.")
+
+            # --- B. STATISTIQUES (FISHER) ---
+            st.markdown("---")
+            st.subheader("🧪 Tableau des Significativités (Fisher)")
+
+            # 1. Préparation Matrice Complète
             matrix_bin = df_res.pivot_table(index="Pseudo", columns="Gene_symbol", aggfunc='size', fill_value=0)
             matrix_bin[matrix_bin > 0] = 1
             
-            # INFO DE DEBUG (Pour comprendre pourquoi ça bloque)
-            n_genes_total = matrix_bin.shape[1]
-            n_pats_total = matrix_bin.shape[0]
-            st.info(f"ℹ️ **Diagnostic :** La matrice contient {n_pats_total} patients et {n_genes_total} gènes mutés.")
+            col_param1, col_param2 = st.columns(2)
+            with col_param1:
+                # On met 1 par défaut pour forcer des résultats
+                min_patients = st.number_input("Min. patients par gène", 1, 100, 1, key="fisher_min_pat")
+            with col_param2:
+                # On met 1.0 par défaut pour TOUT voir, même le non-significatif
+                p_val_cut = st.number_input("Seuil P-value (1.0 = tout)", 0.0, 1.0, 1.0, step=0.01, key="fisher_pval")
 
-            # 3. Heatmap Visuelle
-            if n_genes_total > 0:
-                # On prend max 30 gènes pour l'affichage visuel pour ne pas surcharger
-                top_genes_viz = matrix_bin.sum().sort_values(ascending=False).head(30).index
-                mat_viz = matrix_bin[top_genes_viz]
-                # Co-occurrence simple (Produit matriciel)
-                co_occ = mat_viz.T.dot(mat_viz)
-                st.plotly_chart(px.imshow(co_occ, text_auto=True, color_continuous_scale="Viridis", height=600, title="Heatmap des Co-occurrences (Top 30)"))
+            # Filtrage des gènes
+            genes_to_test = [g for g in matrix_bin.columns if matrix_bin[g].sum() >= min_patients]
             
-            # 4. SECTION STATISTIQUE (FISHER)
-            st.markdown("---")
-            st.subheader("🧪 Test Statistique de Fisher")
-            
-            # Paramètres utilisateurs
-            c1, c2 = st.columns(2)
-            # On met 1 par défaut pour être sûr d'avoir des gènes
-            min_freq = c1.number_input("Nombre min. de patients par gène", 1, 100, 1) 
-            p_seuil = c2.number_input("Seuil P-value", 0.0001, 1.0, 0.05, format="%.4f")
-            
-            # Filtrage des gènes pour le test
-            genes_to_test = [g for g in matrix_bin.columns if matrix_bin[g].sum() >= min_freq]
-            
-            st.write(f"**Gènes éligibles pour le test :** {len(genes_to_test)}")
-            
-            if len(genes_to_test) < 2:
-                st.warning("⛔ Pas assez de gènes pour faire des paires (Besoin de 2 minimum). Baissez le filtre 'Nombre min' à 1 ou relâchez les filtres ACMG/CADD.")
-            else:
-                # BOUTON TOUJOURS VISIBLE
-                if st.button("▶️ LANCER L'ANALYSE STATISTIQUE MAINTENANT"):
+            st.info(f"ℹ️ **Diagnostic :** {len(genes_to_test)} gènes qualifiés pour le test (sur {len(matrix_bin.columns)} total).")
+
+            # Initialisation Session State pour garder le tableau affiché
+            if "fisher_df" not in st.session_state:
+                st.session_state["fisher_df"] = None
+
+            # BOUTON D'ANALYSE
+            if len(genes_to_test) >= 2:
+                if st.button("▶️ LANCER LE CALCUL MAINTENANT", key="btn_fisher", type="primary"):
                     
-                    # On limite à 50 gènes pour éviter le crash si l'utilisateur met min_freq=1 sur un gros fichier
-                    if len(genes_to_test) > 50:
-                        st.warning("⚠️ Trop de gènes (>50). On garde les 50 plus fréquents pour la rapidité.")
-                        genes_to_test = matrix_bin[genes_to_test].sum().sort_values(ascending=False).head(50).index.tolist()
-                    
+                    # Limite de sécurité
+                    if len(genes_to_test) > 60:
+                        st.warning("Trop de gènes (>60). Analyse restreinte aux 60 plus fréquents pour éviter le crash.")
+                        genes_to_test = matrix_bin[genes_to_test].sum().sort_values(ascending=False).head(60).index.tolist()
+
                     results = []
-                    # Barre de progression
                     prog_bar = st.progress(0)
-                    total_pairs = (len(genes_to_test) * (len(genes_to_test) - 1)) // 2
-                    current = 0
+                    total_comb = (len(genes_to_test) * (len(genes_to_test) - 1)) // 2
+                    curr = 0
                     
-                    # Boucle de calcul
                     for i in range(len(genes_to_test)):
                         for j in range(i + 1, len(genes_to_test)):
-                            g1 = genes_to_test[i]
-                            g2 = genes_to_test[j]
+                            g1, g2 = genes_to_test[i], genes_to_test[j]
                             
-                            # Table de contingence (Explication visuelle ci-dessous)
-                            # [ Both   | G1_only ]
-                            # [ G2_only| None    ]
+                            # Calcul Contingence
+                            # Both (1,1) | G1 (1,0)
+                            # G2   (0,1) | None (0,0)
                             both = ((matrix_bin[g1] == 1) & (matrix_bin[g2] == 1)).sum()
                             g1_only = ((matrix_bin[g1] == 1) & (matrix_bin[g2] == 0)).sum()
                             g2_only = ((matrix_bin[g1] == 0) & (matrix_bin[g2] == 1)).sum()
@@ -382,41 +380,56 @@ if st.session_state["analysis_done"]:
                             try:
                                 odds, p_val = fisher_exact([[both, g1_only], [g2_only, none]])
                                 
-                                if p_val <= p_seuil:
-                                    type_rel = "Co-occurrence" if odds > 1 else "Exclusion"
-                                    if both == 0: type_rel = "Exclusion (Mutuelle)"
+                                if p_val <= p_val_cut:
+                                    rel_type = "Co-occurrence" if odds > 1 else "Exclusion"
+                                    if both == 0: rel_type = "Exclusion"
                                     
                                     results.append({
-                                        "Gène A": g1,
-                                        "Gène B": g2,
-                                        "Relation": type_rel,
-                                        "Patients Communs": int(both),
+                                        "Paire": f"{g1} - {g2}",
+                                        "Type": rel_type,
+                                        "Commun": int(both),
+                                        "G1 seul": int(g1_only),
+                                        "G2 seul": int(g2_only),
                                         "P-value": round(p_val, 5),
                                         "Odds Ratio": round(odds, 2)
                                     })
-                            except:
-                                pass # Ignorer les erreurs de calcul isolées
+                            except: pass
                             
-                            current += 1
-                            if total_pairs > 0:
-                                prog_bar.progress(min(current / total_pairs, 1.0))
+                            curr += 1
+                            if total_comb > 0: prog_bar.progress(min(curr / total_comb, 1.0))
                     
                     prog_bar.empty()
                     
-                    # Affichage Résultats
                     if results:
-                        st.success(f"✅ {len(results)} paires significatives trouvées !")
-                        df_res_stat = pd.DataFrame(results).sort_values("P-value")
-                        
-                        # Coloration conditionnelle
-                        def color_rows(row):
-                            color = '#d4edda' if row['Relation'] == 'Co-occurrence' else '#f8d7da'
-                            return [f'background-color: {color}'] * len(row)
-
-                        st.dataframe(df_res_stat.style.apply(color_rows, axis=1))
+                        # On sauvegarde dans la session pour que ça reste affiché
+                        st.session_state["fisher_df"] = pd.DataFrame(results).sort_values("P-value")
                     else:
-                        st.warning("Aucune corrélation significative trouvée avec ce seuil de P-value.")
-                        st.markdown("**Conseil :** Augmentez le seuil P-value à 0.1 ou 0.2 pour voir les tendances faibles.")
+                        st.session_state["fisher_df"] = pd.DataFrame() # Vide mais existe
+                        st.warning("Aucun résultat trouvé avec ces critères.")
+
+            # AFFICHAGE DU RÉSULTAT (En dehors du if button pour persister)
+            if st.session_state["fisher_df"] is not None and not st.session_state["fisher_df"].empty:
+                st.success(f"✅ {len(st.session_state['fisher_df'])} paires analysées.")
+                
+                # Fonction de style simple
+                def color_p(val):
+                    return 'background-color: #d4edda; color: black' if val < 0.05 else ''
+                
+                st.dataframe(
+                    st.session_state["fisher_df"].style.applymap(color_p, subset=['P-value']),
+                    use_container_width=True,
+                    height=500
+                )
+                
+                # Export CSV
+                csv = st.session_state["fisher_df"].to_csv(index=False).encode('utf-8')
+                st.download_button("📥 Télécharger CSV", csv, "stats_fisher.csv", "text/csv")
+            
+            elif st.session_state["fisher_df"] is not None and st.session_state["fisher_df"].empty:
+                st.warning("Le calcul a été fait mais le tableau est vide (aucun résultat sous le seuil P-value).")
+
+        else:
+            st.error("Données insuffisantes pour l'onglet Corrélation.")
     # --- TAB 3: CLONALE ---
     with tabs[2]:
         st.subheader("🧬 Architecture Clonale")
